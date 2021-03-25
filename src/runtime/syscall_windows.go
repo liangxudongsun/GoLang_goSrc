@@ -5,6 +5,7 @@
 package runtime
 
 import (
+	"internal/abi"
 	"runtime/internal/sys"
 	"unsafe"
 )
@@ -70,8 +71,8 @@ func callbackasmAddr(i int) uintptr {
 		panic("unsupported architecture")
 	case "386", "amd64":
 		entrySize = 5
-	case "arm":
-		// On ARM, each entry is a MOV instruction
+	case "arm", "arm64":
+		// On ARM and ARM64, each entry is a MOV instruction
 		// followed by a branch instruction
 		entrySize = 8
 	}
@@ -115,13 +116,14 @@ func compileCallback(fn eface, cdecl bool) (code uintptr) {
 			// registers and the stack.
 			panic("compileCallback: argument size is larger than uintptr")
 		}
-		if k := t.kind & kindMask; (GOARCH == "amd64" || GOARCH == "arm") && (k == kindFloat32 || k == kindFloat64) {
+		if k := t.kind & kindMask; GOARCH != "386" && (k == kindFloat32 || k == kindFloat64) {
 			// In fastcall, floating-point arguments in
 			// the first four positions are passed in
 			// floating-point registers, which we don't
 			// currently spill. arm passes floating-point
 			// arguments in VFP registers, which we also
 			// don't support.
+			// So basically we only support 386.
 			panic("compileCallback: float arguments not supported")
 		}
 
@@ -146,6 +148,7 @@ func compileCallback(fn eface, cdecl bool) (code uintptr) {
 		}
 
 		// cdecl, stdcall, fastcall, and arm pad arguments to word size.
+		// TODO(rsc): On arm and arm64 do we need to skip the caller's saved LR?
 		src += sys.PtrSize
 		// The Go ABI packs arguments.
 		dst += t.size
@@ -242,7 +245,11 @@ func callbackWrap(a *callbackArgs) {
 
 	// Even though this is copying back results, we can pass a nil
 	// type because those results must not require write barriers.
-	reflectcall(nil, unsafe.Pointer(c.fn), noescape(goArgs), uint32(c.retOffset)+sys.PtrSize, uint32(c.retOffset))
+	//
+	// Pass a dummy RegArgs for now.
+	// TODO(mknyszek): Pass arguments in registers.
+	var regs abi.RegArgs
+	reflectcall(nil, unsafe.Pointer(c.fn), noescape(goArgs), uint32(c.retOffset)+sys.PtrSize, uint32(c.retOffset), uint32(c.retOffset)+sys.PtrSize, &regs)
 
 	// Extract the result.
 	a.result = *(*uintptr)(unsafe.Pointer(&frame[c.retOffset]))
@@ -256,6 +263,7 @@ const _LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800
 // to the full path inside of system32 for use with vanilla LoadLibrary.
 //go:linkname syscall_loadsystemlibrary syscall.loadsystemlibrary
 //go:nosplit
+//go:cgo_unsafe_args
 func syscall_loadsystemlibrary(filename *uint16, absoluteFilepath *uint16) (handle, err uintptr) {
 	lockOSThread()
 	c := &getg().m.syscall
@@ -286,6 +294,7 @@ func syscall_loadsystemlibrary(filename *uint16, absoluteFilepath *uint16) (hand
 
 //go:linkname syscall_loadlibrary syscall.loadlibrary
 //go:nosplit
+//go:cgo_unsafe_args
 func syscall_loadlibrary(filename *uint16) (handle, err uintptr) {
 	lockOSThread()
 	defer unlockOSThread()
@@ -303,6 +312,7 @@ func syscall_loadlibrary(filename *uint16) (handle, err uintptr) {
 
 //go:linkname syscall_getprocaddress syscall.getprocaddress
 //go:nosplit
+//go:cgo_unsafe_args
 func syscall_getprocaddress(handle uintptr, procname *byte) (outhandle, err uintptr) {
 	lockOSThread()
 	defer unlockOSThread()
@@ -320,6 +330,7 @@ func syscall_getprocaddress(handle uintptr, procname *byte) (outhandle, err uint
 
 //go:linkname syscall_Syscall syscall.Syscall
 //go:nosplit
+//go:cgo_unsafe_args
 func syscall_Syscall(fn, nargs, a1, a2, a3 uintptr) (r1, r2, err uintptr) {
 	lockOSThread()
 	defer unlockOSThread()
@@ -333,6 +344,7 @@ func syscall_Syscall(fn, nargs, a1, a2, a3 uintptr) (r1, r2, err uintptr) {
 
 //go:linkname syscall_Syscall6 syscall.Syscall6
 //go:nosplit
+//go:cgo_unsafe_args
 func syscall_Syscall6(fn, nargs, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, err uintptr) {
 	lockOSThread()
 	defer unlockOSThread()
@@ -346,6 +358,7 @@ func syscall_Syscall6(fn, nargs, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, err ui
 
 //go:linkname syscall_Syscall9 syscall.Syscall9
 //go:nosplit
+//go:cgo_unsafe_args
 func syscall_Syscall9(fn, nargs, a1, a2, a3, a4, a5, a6, a7, a8, a9 uintptr) (r1, r2, err uintptr) {
 	lockOSThread()
 	defer unlockOSThread()
@@ -359,6 +372,7 @@ func syscall_Syscall9(fn, nargs, a1, a2, a3, a4, a5, a6, a7, a8, a9 uintptr) (r1
 
 //go:linkname syscall_Syscall12 syscall.Syscall12
 //go:nosplit
+//go:cgo_unsafe_args
 func syscall_Syscall12(fn, nargs, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12 uintptr) (r1, r2, err uintptr) {
 	lockOSThread()
 	defer unlockOSThread()
@@ -372,6 +386,7 @@ func syscall_Syscall12(fn, nargs, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, 
 
 //go:linkname syscall_Syscall15 syscall.Syscall15
 //go:nosplit
+//go:cgo_unsafe_args
 func syscall_Syscall15(fn, nargs, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15 uintptr) (r1, r2, err uintptr) {
 	lockOSThread()
 	defer unlockOSThread()
@@ -385,6 +400,7 @@ func syscall_Syscall15(fn, nargs, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, 
 
 //go:linkname syscall_Syscall18 syscall.Syscall18
 //go:nosplit
+//go:cgo_unsafe_args
 func syscall_Syscall18(fn, nargs, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18 uintptr) (r1, r2, err uintptr) {
 	lockOSThread()
 	defer unlockOSThread()

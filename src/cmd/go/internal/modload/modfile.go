@@ -29,7 +29,6 @@ import (
 // module-module "all" pattern no longer closes over the dependencies of
 // tests outside of the main module.
 const narrowAllVersionV = "v1.16"
-const go116EnableNarrowAll = true
 
 var modFile *modfile.File
 
@@ -257,10 +256,13 @@ func indexModFile(data []byte, modFile *modfile.File, needsFix bool) *modFileInd
 	}
 
 	i.goVersionV = ""
-	if modFile.Go != nil {
+	if modFile.Go == nil {
+		rawGoVersion.Store(Target, "")
+	} else {
 		// We're going to use the semver package to compare Go versions, so go ahead
 		// and add the "v" prefix it expects once instead of every time.
 		i.goVersionV = "v" + modFile.Go.Version
+		rawGoVersion.Store(Target, modFile.Go.Version)
 	}
 
 	i.require = make(map[module.Version]requireMeta, len(modFile.Require))
@@ -297,9 +299,6 @@ func indexModFile(data []byte, modFile *modfile.File, needsFix bool) *modFileInd
 // (Otherwise — as in Go 1.16+ — the "all" pattern includes only the packages
 // transitively *imported by* the packages and tests in the main module.)
 func (i *modFileIndex) allPatternClosesOverTests() bool {
-	if !go116EnableNarrowAll {
-		return true
-	}
 	if i != nil && semver.Compare(i.goVersionV, narrowAllVersionV) < 0 {
 		// The module explicitly predates the change in "all" for lazy loading, so
 		// continue to use the older interpretation. (If i == nil, we not in any
@@ -446,10 +445,10 @@ func goModSummary(m module.Version) (*modFileSummary, error) {
 	if actual.Path == "" {
 		actual = m
 	}
-	if cfg.BuildMod == "readonly" && actual.Version != "" {
+	if HasModRoot() && cfg.BuildMod == "readonly" && actual.Version != "" {
 		key := module.Version{Path: actual.Path, Version: actual.Version + "/go.mod"}
 		if !modfetch.HaveSum(key) {
-			suggestion := fmt.Sprintf("; try 'go mod download %s' to add it", m.Path)
+			suggestion := fmt.Sprintf("; to add it:\n\tgo mod download %s", m.Path)
 			return nil, module.VersionError(actual, &sumMissingError{suggestion: suggestion})
 		}
 	}

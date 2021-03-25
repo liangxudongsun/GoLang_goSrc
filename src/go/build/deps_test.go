@@ -10,6 +10,7 @@ package build
 import (
 	"bytes"
 	"fmt"
+	"go/token"
 	"internal/testenv"
 	"io/fs"
 	"os"
@@ -75,9 +76,14 @@ var depsRules = `
 	  unicode/utf8, unicode/utf16, unicode,
 	  unsafe;
 
+	# These packages depend only on unsafe.
+	unsafe
+	< internal/abi;
+
 	# RUNTIME is the core runtime group of packages, all of them very light-weight.
-	internal/cpu, unsafe
+	internal/abi, internal/cpu, unsafe
 	< internal/bytealg
+	< internal/itoa
 	< internal/unsafeheader
 	< runtime/internal/sys
 	< runtime/internal/atomic
@@ -162,6 +168,9 @@ var depsRules = `
 	< os
 	< os/signal;
 
+	io/fs
+	< embed;
+
 	unicode, fmt !< os, os/signal;
 
 	os/signal, STR
@@ -174,7 +183,7 @@ var depsRules = `
 	reflect !< OS;
 
 	OS
-	< golang.org/x/sys/cpu, internal/goroot;
+	< golang.org/x/sys/cpu;
 
 	# FMT is OS (which includes string routines) plus reflect and fmt.
 	# It does not include package log, which should be avoided in core packages.
@@ -189,6 +198,12 @@ var depsRules = `
 	< FMT;
 
 	log !< FMT;
+
+	OS, FMT
+	< internal/execabs;
+
+	OS, internal/execabs
+	< internal/goroot;
 
 	# Misc packages needing only FMT.
 	FMT
@@ -265,7 +280,10 @@ var depsRules = `
 	< go/ast
 	< go/parser;
 
-	go/parser, text/tabwriter
+	FMT
+	< go/build/constraint;
+
+	go/build/constraint, go/parser, text/tabwriter
 	< go/printer
 	< go/format;
 
@@ -275,10 +293,10 @@ var depsRules = `
 	math/big, go/token
 	< go/constant;
 
-	container/heap, go/constant, go/parser
+	container/heap, go/constant, go/parser, regexp
 	< go/types;
 
-	go/doc, go/parser, internal/goroot, internal/goversion
+	go/build/constraint, go/doc, go/parser, internal/goroot, internal/goversion
 	< go/build;
 
 	DEBUG, go/build, go/types, text/scanner
@@ -602,6 +620,7 @@ func findImports(pkg string) ([]string, error) {
 	}
 	var imports []string
 	var haveImport = map[string]bool{}
+	fset := token.NewFileSet()
 	for _, file := range files {
 		name := file.Name()
 		if name == "slice_go14.go" || name == "slice_go18.go" {
@@ -611,8 +630,10 @@ func findImports(pkg string) ([]string, error) {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		var info fileInfo
-		info.name = filepath.Join(dir, name)
+		info := fileInfo{
+			name: filepath.Join(dir, name),
+			fset: fset,
+		}
 		f, err := os.Open(info.name)
 		if err != nil {
 			return nil, err
@@ -838,5 +859,24 @@ func TestStdlibLowercase(t *testing.T) {
 		if strings.ToLower(pkgname) != pkgname {
 			t.Errorf("package %q should not use upper-case path", pkgname)
 		}
+	}
+}
+
+// TestFindImports tests that findImports works.  See #43249.
+func TestFindImports(t *testing.T) {
+	imports, err := findImports("go/build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("go/build imports %q", imports)
+	want := []string{"bytes", "os", "path/filepath", "strings"}
+wantLoop:
+	for _, w := range want {
+		for _, imp := range imports {
+			if imp == w {
+				continue wantLoop
+			}
+		}
+		t.Errorf("expected to find %q in import list", w)
 	}
 }

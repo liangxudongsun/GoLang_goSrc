@@ -207,7 +207,7 @@ func wakeScavenger() {
 		// Ready the goroutine by injecting it. We use injectglist instead
 		// of ready or goready in order to allow us to run this function
 		// without a P. injectglist also avoids placing the goroutine in
-		// the current P's runnext slot, which is desireable to prevent
+		// the current P's runnext slot, which is desirable to prevent
 		// the scavenger from interfering with user goroutine scheduling
 		// too much.
 		var list gList
@@ -249,7 +249,7 @@ func scavengeSleep(ns int64) int64 {
 // The background scavenger maintains the RSS of the application below
 // the line described by the proportional scavenging statistics in
 // the mheap struct.
-func bgscavenge(c chan int) {
+func bgscavenge() {
 	scavenge.g = getg()
 
 	lockInit(&scavenge.lock, lockRankScavenge)
@@ -261,7 +261,7 @@ func bgscavenge(c chan int) {
 		wakeScavenger()
 	}
 
-	c <- 1
+	gcenable_setup <- 1
 	goparkunlock(&scavenge.lock, waitReasonGCScavengeWait, traceEvGoBlock, 1)
 
 	// Exponentially-weighted moving average of the fraction of time this
@@ -562,7 +562,7 @@ func (p *pageAlloc) scavengeUnreserve(r addrRange, gen uint32) {
 func (p *pageAlloc) scavengeOne(work addrRange, max uintptr, mayUnlock bool) (uintptr, addrRange) {
 	assertLockHeld(p.mheapLock)
 
-	// Defensively check if we've recieved an empty address range.
+	// Defensively check if we've received an empty address range.
 	// If so, just return.
 	if work.size() == 0 {
 		// Nothing to do.

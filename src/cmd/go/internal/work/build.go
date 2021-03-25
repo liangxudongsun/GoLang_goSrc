@@ -9,9 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"go/build"
+	exec "internal/execabs"
 	"internal/goroot"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -71,7 +71,7 @@ and test commands:
 	-p n
 		the number of programs, such as build commands or
 		test binaries, that can be run in parallel.
-		The default is the number of CPUs available.
+		The default is GOMAXPROCS, normally the number of CPUs available.
 	-race
 		enable data race detection.
 		Supported only on linux/amd64, freebsd/amd64, darwin/amd64, windows/amd64,
@@ -113,7 +113,10 @@ and test commands:
 		created with -buildmode=shared.
 	-mod mode
 		module download mode to use: readonly, vendor, or mod.
-		See 'go help modules' for more.
+		By default, if a vendor directory is present and the go version in go.mod
+		is 1.14 or higher, the go command acts as if -mod=vendor were set.
+		Otherwise, the go command acts as if -mod=readonly were set.
+		See https://golang.org/ref/mod#build-commands for details.
 	-modcacherw
 		leave newly-created directories in the module cache read-write
 		instead of making them read-only.
@@ -479,18 +482,22 @@ To eliminate ambiguity about which module versions are used in the build, the
 arguments must satisfy the following constraints:
 
 - Arguments must be package paths or package patterns (with "..." wildcards).
-  They must not be standard packages (like fmt), meta-patterns (std, cmd,
-  all), or relative or absolute file paths.
+They must not be standard packages (like fmt), meta-patterns (std, cmd,
+all), or relative or absolute file paths.
+
 - All arguments must have the same version suffix. Different queries are not
-  allowed, even if they refer to the same version.
+allowed, even if they refer to the same version.
+
 - All arguments must refer to packages in the same module at the same version.
+
 - No module is considered the "main" module. If the module containing
-  packages named on the command line has a go.mod file, it must not contain
-  directives (replace and exclude) that would cause it to be interpreted
-  differently than if it were the main module. The module must not require
-  a higher version of itself.
+packages named on the command line has a go.mod file, it must not contain
+directives (replace and exclude) that would cause it to be interpreted
+differently than if it were the main module. The module must not require
+a higher version of itself.
+
 - Package path arguments must refer to main packages. Pattern arguments
-  will only match main packages.
+will only match main packages.
 
 If the arguments don't have version suffixes, "go install" may run in
 module-aware mode or GOPATH mode, depending on the GO111MODULE environment
@@ -833,7 +840,7 @@ func installOutsideModule(ctx context.Context, args []string) {
 	// Since we are in NoRoot mode, the build list initially contains only
 	// the dummy command-line-arguments module. Add a requirement on the
 	// module that provides the packages named on the command line.
-	if err := modload.EditBuildList(ctx, nil, []module.Version{installMod}); err != nil {
+	if _, err := modload.EditBuildList(ctx, nil, []module.Version{installMod}); err != nil {
 		base.Fatalf("go install %s: %v", args[0], err)
 	}
 

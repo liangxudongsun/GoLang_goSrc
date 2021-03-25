@@ -101,8 +101,7 @@ func gcMarkRootPrepare() {
 	// Gs may be created after this point, but it's okay that we
 	// ignore them because they begin life without any roots, so
 	// there's nothing to scan, and any roots they create during
-	// the concurrent phase will be scanned during mark
-	// termination.
+	// the concurrent phase will be caught by the write barrier.
 	work.nStackRoots = int(atomic.Loaduintptr(&allglen))
 
 	work.markrootNext = 0
@@ -117,24 +116,26 @@ func gcMarkRootCheck() {
 		throw("left over markroot jobs")
 	}
 
-	lock(&allglock)
 	// Check that stacks have been scanned.
-	var gp *g
-	for i := 0; i < work.nStackRoots; i++ {
-		gp = allgs[i]
-		if !gp.gcscandone {
-			goto fail
+	//
+	// We only check the first nStackRoots Gs that we should have scanned.
+	// Since we don't care about newer Gs (see comment in
+	// gcMarkRootPrepare), no locking is required.
+	i := 0
+	forEachGRace(func(gp *g) {
+		if i >= work.nStackRoots {
+			return
 		}
-	}
-	unlock(&allglock)
-	return
 
-fail:
-	println("gp", gp, "goid", gp.goid,
-		"status", readgstatus(gp),
-		"gcscandone", gp.gcscandone)
-	unlock(&allglock) // Avoid self-deadlock with traceback.
-	throw("scan missed a g")
+		if !gp.gcscandone {
+			println("gp", gp, "goid", gp.goid,
+				"status", readgstatus(gp),
+				"gcscandone", gp.gcscandone)
+			throw("scan missed a g")
+		}
+
+		i++
+	})
 }
 
 // ptrmask for an allocation containing a single pointer.
@@ -191,6 +192,9 @@ func markroot(gcw *gcWork, i uint32) {
 		// the rest is scanning goroutine stacks
 		var gp *g
 		if baseStacks <= i && i < end {
+			// N.B. Atomic read of allglen in gcMarkRootPrepare
+			// acts as a barrier to ensure that allgs must be large
+			// enough to contain all relevant Gs.
 			gp = allgs[i-baseStacks]
 		} else {
 			throw("markroot: bad index")

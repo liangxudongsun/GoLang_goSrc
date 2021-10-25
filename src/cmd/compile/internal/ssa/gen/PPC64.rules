@@ -12,20 +12,20 @@
 (Sub64F ...) => (FSUB ...)
 
 // Combine 64 bit integer multiply and adds
-(ADD l:(MULLD x y) z) && objabi.GOPPC64 >= 9 && l.Uses == 1 && clobber(l) => (MADDLD x y z)
+(ADD l:(MULLD x y) z) && buildcfg.GOPPC64 >= 9 && l.Uses == 1 && clobber(l) => (MADDLD x y z)
 
 (Mod16 x y) => (Mod32 (SignExt16to32 x) (SignExt16to32 y))
 (Mod16u x y) => (Mod32u (ZeroExt16to32 x) (ZeroExt16to32 y))
 (Mod8 x y) => (Mod32 (SignExt8to32 x) (SignExt8to32 y))
 (Mod8u x y) => (Mod32u (ZeroExt8to32 x) (ZeroExt8to32 y))
-(Mod64 x y) && objabi.GOPPC64 >=9 => (MODSD x y)
-(Mod64 x y) && objabi.GOPPC64 <=8 => (SUB x (MULLD y (DIVD x y)))
-(Mod64u x y) && objabi.GOPPC64 >= 9 => (MODUD x y)
-(Mod64u x y) && objabi.GOPPC64 <= 8 => (SUB x (MULLD y (DIVDU x y)))
-(Mod32 x y) && objabi.GOPPC64 >= 9 => (MODSW x y)
-(Mod32 x y) && objabi.GOPPC64 <= 8 => (SUB x (MULLW y (DIVW x y)))
-(Mod32u x y) && objabi.GOPPC64 >= 9 => (MODUW x y)
-(Mod32u x y) && objabi.GOPPC64 <= 8 => (SUB x (MULLW y (DIVWU x y)))
+(Mod64 x y) && buildcfg.GOPPC64 >=9 => (MODSD x y)
+(Mod64 x y) && buildcfg.GOPPC64 <=8 => (SUB x (MULLD y (DIVD x y)))
+(Mod64u x y) && buildcfg.GOPPC64 >= 9 => (MODUD x y)
+(Mod64u x y) && buildcfg.GOPPC64 <= 8 => (SUB x (MULLD y (DIVDU x y)))
+(Mod32 x y) && buildcfg.GOPPC64 >= 9 => (MODSW x y)
+(Mod32 x y) && buildcfg.GOPPC64 <= 8 => (SUB x (MULLW y (DIVW x y)))
+(Mod32u x y) && buildcfg.GOPPC64 >= 9 => (MODUW x y)
+(Mod32u x y) && buildcfg.GOPPC64 <= 8 => (SUB x (MULLW y (DIVWU x y)))
 
 // (x + y) / 2 with x>=y => (x - y) / 2 + y
 (Avg64u <t> x y) => (ADD (SRDconst <t> (SUB <t> x y) [1]) y)
@@ -351,9 +351,9 @@
 (Ctz32NonZero ...) => (Ctz32 ...)
 (Ctz64NonZero ...) => (Ctz64 ...)
 
-(Ctz64 x) && objabi.GOPPC64<=8 => (POPCNTD (ANDN <typ.Int64> (ADDconst <typ.Int64> [-1] x) x))
+(Ctz64 x) && buildcfg.GOPPC64<=8 => (POPCNTD (ANDN <typ.Int64> (ADDconst <typ.Int64> [-1] x) x))
 (Ctz64 x) => (CNTTZD x)
-(Ctz32 x) && objabi.GOPPC64<=8 => (POPCNTW (MOVWZreg (ANDN <typ.Int> (ADDconst <typ.Int> [-1] x) x)))
+(Ctz32 x) && buildcfg.GOPPC64<=8 => (POPCNTW (MOVWZreg (ANDN <typ.Int> (ADDconst <typ.Int> [-1] x) x)))
 (Ctz32 x) => (CNTTZW (MOVWZreg x))
 (Ctz16 x) => (POPCNTW (MOVHZreg (ANDN <typ.Int16> (ADDconst <typ.Int16> [-1] x) x)))
 (Ctz8 x)  => (POPCNTB (MOVBZreg (ANDN <typ.UInt8> (ADDconst <typ.UInt8> [-1] x) x)))
@@ -580,7 +580,7 @@
 (Store {t} ptr val mem) && t.Size() == 8 && is64BitFloat(val.Type) => (FMOVDstore ptr val mem)
 (Store {t} ptr val mem) && t.Size() == 8 && is32BitFloat(val.Type) => (FMOVDstore ptr val mem) // glitch from (Cvt32Fto64F x) => x -- type is wrong
 (Store {t} ptr val mem) && t.Size() == 4 && is32BitFloat(val.Type) => (FMOVSstore ptr val mem)
-(Store {t} ptr val mem) && t.Size() == 8 && (is64BitInt(val.Type) || isPtr(val.Type)) => (MOVDstore ptr val mem)
+(Store {t} ptr val mem) && t.Size() == 8 && !is64BitFloat(val.Type) => (MOVDstore ptr val mem)
 (Store {t} ptr val mem) && t.Size() == 4 && is32BitInt(val.Type) => (MOVWstore ptr val mem)
 (Store {t} ptr val mem) && t.Size() == 2 => (MOVHstore ptr val mem)
 (Store {t} ptr val mem) && t.Size() == 1 => (MOVBstore ptr val mem)
@@ -627,10 +627,10 @@
 // Handle cases not handled above
 // Lowered Short cases do not generate loops, and as a result don't clobber
 // the address registers or flags.
-(Zero [s] ptr mem) && objabi.GOPPC64 <= 8 && s < 64 => (LoweredZeroShort [s] ptr mem)
-(Zero [s] ptr mem) && objabi.GOPPC64 <= 8 => (LoweredZero [s] ptr mem)
-(Zero [s] ptr mem) && s < 128 && objabi.GOPPC64 >= 9 => (LoweredQuadZeroShort [s] ptr mem)
-(Zero [s] ptr mem) && objabi.GOPPC64 >= 9 => (LoweredQuadZero [s] ptr mem)
+(Zero [s] ptr mem) && buildcfg.GOPPC64 <= 8 && s < 64 => (LoweredZeroShort [s] ptr mem)
+(Zero [s] ptr mem) && buildcfg.GOPPC64 <= 8 => (LoweredZero [s] ptr mem)
+(Zero [s] ptr mem) && s < 128 && buildcfg.GOPPC64 >= 9 => (LoweredQuadZeroShort [s] ptr mem)
+(Zero [s] ptr mem) && buildcfg.GOPPC64 >= 9 => (LoweredQuadZero [s] ptr mem)
 
 // moves
 (Move [0] _ _ mem) => mem
@@ -658,11 +658,11 @@
 
 // Large move uses a loop. Since the address is computed and the
 // offset is zero, any alignment can be used.
-(Move [s] dst src mem) && s > 8 && objabi.GOPPC64 <= 8 && logLargeCopy(v, s) =>
+(Move [s] dst src mem) && s > 8 && buildcfg.GOPPC64 <= 8 && logLargeCopy(v, s) =>
         (LoweredMove [s] dst src mem)
-(Move [s] dst src mem) && s > 8 && s <= 64 && objabi.GOPPC64 >= 9 =>
+(Move [s] dst src mem) && s > 8 && s <= 64 && buildcfg.GOPPC64 >= 9 =>
         (LoweredQuadMoveShort [s] dst src mem)
-(Move [s] dst src mem) && s > 8 && objabi.GOPPC64 >= 9 && logLargeCopy(v, s) =>
+(Move [s] dst src mem) && s > 8 && buildcfg.GOPPC64 >= 9 && logLargeCopy(v, s) =>
         (LoweredQuadMove [s] dst src mem)
 
 // Calls
@@ -670,6 +670,7 @@
 (StaticCall ...) => (CALLstatic ...)
 (ClosureCall ...) => (CALLclosure ...)
 (InterCall ...) => (CALLinter ...)
+(TailCall ...) => (CALLtail ...)
 
 // Miscellaneous
 (GetClosurePtr ...) => (LoweredGetClosurePtr ...)
@@ -847,6 +848,7 @@
 (ADDconst [c] (SUBFCconst [d] x)) && is32Bit(c+d) => (SUBFCconst [c+d] x)
 (NEG (ADDconst [c] x)) && is32Bit(-c) => (SUBFCconst [-c] x)
 (NEG (SUBFCconst [c] x)) && is32Bit(-c) => (ADDconst [-c] x)
+(NEG (SUB x y)) => (SUB y x)
 
 // Use register moves instead of stores and loads to move int<=>float values
 // Common with math Float64bits, Float64frombits
@@ -1018,6 +1020,8 @@
 (MOVWZreg x:(MOVWZloadidx _ _ _)) => x
 (MOVWreg x:(MOVWload _ _)) => x
 (MOVWreg x:(MOVWloadidx _ _ _)) => x
+(MOVBZreg x:(Select0 (LoweredAtomicLoad8 _ _))) => x
+(MOVWZreg x:(Select0 (LoweredAtomicLoad32 _ _))) => x
 
 // don't extend if argument is already extended
 (MOVBreg x:(Arg <t>)) && is8BitInt(t) && isSigned(t) => x
@@ -1048,7 +1052,7 @@
 (SLWconst [c] z:(ANDconst [d] x)) && z.Uses == 1 && isPPC64ValidShiftMask(d) && c<=(32-getPPC64ShiftMaskLength(d)) => (CLRLSLWI [newPPC64ShiftAuxInt(c,32-getPPC64ShiftMaskLength(d),31,32)] x)
 (SLWconst [c] z:(AND (MOVDconst [d]) x)) && z.Uses == 1 && isPPC64ValidShiftMask(d) && c<=(32-getPPC64ShiftMaskLength(d)) => (CLRLSLWI [newPPC64ShiftAuxInt(c,32-getPPC64ShiftMaskLength(d),31,32)] x)
 // special case for power9
-(SL(W|D)const [c] z:(MOVWreg x)) && c < 32 && objabi.GOPPC64 >= 9 => (EXTSWSLconst [c] x)
+(SL(W|D)const [c] z:(MOVWreg x)) && c < 32 && buildcfg.GOPPC64 >= 9 => (EXTSWSLconst [c] x)
 
 // Lose widening ops fed to stores
 (MOVBstore [off] {sym} ptr (MOV(B|BZ|H|HZ|W|WZ)reg x) mem) => (MOVBstore [off] {sym} ptr x mem)
@@ -1084,7 +1088,7 @@
 ((CMP|CMPW|CMPU|CMPWU) x y) && canonLessThan(x,y) => (InvertFlags ((CMP|CMPW|CMPU|CMPWU) y x))
 
 // ISEL auxInt values 0=LT 1=GT 2=EQ   arg2 ? arg0 : arg1
-// ISEL auxInt values 4=GE 5=LE 6=NE   arg2 ? arg1 : arg0
+// ISEL auxInt values 4=GE 5=LE 6=NE   !arg2 ? arg1 : arg0
 // ISELB special case where arg0, arg1 values are 0, 1
 
 (Equal cmp) => (ISELB [2] (MOVDconst [1]) cmp)
@@ -1135,6 +1139,9 @@
 (ISEL [n] x y (InvertFlags bool)) && n%4 == 0 => (ISEL [n+1] x y bool)
 (ISEL [n] x y (InvertFlags bool)) && n%4 == 1 => (ISEL [n-1] x y bool)
 (ISEL [n] x y (InvertFlags bool)) && n%4 == 2 => (ISEL [n] x y bool)
+(XORconst [1] (ISELB [6] (MOVDconst [1]) cmp)) => (ISELB [2] (MOVDconst [1]) cmp)
+(XORconst [1] (ISELB [5] (MOVDconst [1]) cmp)) => (ISELB [1] (MOVDconst [1]) cmp)
+(XORconst [1] (ISELB [4] (MOVDconst [1]) cmp)) => (ISELB [0] (MOVDconst [1]) cmp)
 
 // A particular pattern seen in cgo code:
 (AND (MOVDconst [c]) x:(MOVBZload _ _)) => (ANDconst [c&0xFF] x)
@@ -1450,3 +1457,26 @@
         && i1 == i0+1 && i2 == i0+2 && i3 == i0+3 && i4 == i0+4 && i5 == i0+5 && i6 == i0+6 && i7 == i0+7
         && clobber(x0, x1, x2, x3, x4, x5, x6)
           => (MOVDBRstore (MOVDaddr <typ.Uintptr> [i0] {s} p) w mem)
+
+// Arch-specific inlining for small or disjoint runtime.memmove
+(SelectN [0] call:(CALLstatic {sym} s1:(MOVDstore _ (MOVDconst [sz]) s2:(MOVDstore  _ src s3:(MOVDstore {t} _ dst mem)))))
+        && sz >= 0
+        && isSameCall(sym, "runtime.memmove")
+        && s1.Uses == 1 && s2.Uses == 1 && s3.Uses == 1
+        && isInlinableMemmove(dst, src, sz, config)
+        && clobber(s1, s2, s3, call)
+        => (Move [sz] dst src mem)
+
+// Match post-lowering calls, register version.
+(SelectN [0] call:(CALLstatic {sym} dst src (MOVDconst [sz]) mem))
+        && sz >= 0
+        && isSameCall(sym, "runtime.memmove")
+        && call.Uses == 1
+        && isInlinableMemmove(dst, src, sz, config)
+        && clobber(call)
+        => (Move [sz] dst src mem)
+
+// Prefetch instructions (aux is option: 0 - DCBT ; 8 - DCBT stream)
+(PrefetchCache ptr mem)          => (DCBT ptr mem [0])
+(PrefetchCacheStreamed ptr mem)  => (DCBT ptr mem [8])
+

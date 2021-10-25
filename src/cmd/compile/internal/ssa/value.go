@@ -139,6 +139,9 @@ func (v *Value) AuxArm64BitField() arm64BitField {
 
 // long form print.  v# = opcode <type> [aux] args [: reg] (names)
 func (v *Value) LongString() string {
+	if v == nil {
+		return "<NIL VALUE>"
+	}
 	s := fmt.Sprintf("v%d = %s", v.ID, v.Op)
 	s += " <" + v.Type.String() + ">"
 	s += v.auxString()
@@ -299,12 +302,6 @@ func (v *Value) SetArg(i int, w *Value) {
 	v.Args[i] = w
 	w.Uses++
 }
-func (v *Value) RemoveArg(i int) {
-	v.Args[i].Uses--
-	copy(v.Args[i:], v.Args[i+1:])
-	v.Args[len(v.Args)-1] = nil // aid GC
-	v.Args = v.Args[:len(v.Args)-1]
-}
 func (v *Value) SetArgs1(a *Value) {
 	v.resetArgs()
 	v.AddArg(a)
@@ -343,6 +340,39 @@ func (v *Value) reset(op Op) {
 	v.resetArgs()
 	v.AuxInt = 0
 	v.Aux = nil
+}
+
+// invalidateRecursively marks a value as invalid (unused)
+// and after decrementing reference counts on its Args,
+// also recursively invalidates any of those whose use
+// count goes to zero.  It returns whether any of the
+// invalidated values was marked with IsStmt.
+//
+// BEWARE of doing this *before* you've applied intended
+// updates to SSA.
+func (v *Value) invalidateRecursively() bool {
+	lostStmt := v.Pos.IsStmt() == src.PosIsStmt
+	if v.InCache {
+		v.Block.Func.unCache(v)
+	}
+	v.Op = OpInvalid
+
+	for _, a := range v.Args {
+		a.Uses--
+		if a.Uses == 0 {
+			lost := a.invalidateRecursively()
+			lostStmt = lost || lostStmt
+		}
+	}
+
+	v.argstorage[0] = nil
+	v.argstorage[1] = nil
+	v.argstorage[2] = nil
+	v.Args = v.argstorage[:0]
+
+	v.AuxInt = 0
+	v.Aux = nil
+	return lostStmt
 }
 
 // copyOf is called from rewrite rules.

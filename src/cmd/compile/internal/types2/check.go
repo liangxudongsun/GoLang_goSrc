@@ -1,4 +1,3 @@
-// UNREVIEWED
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -17,7 +16,7 @@ import (
 var nopos syntax.Pos
 
 // debugging/development support
-const debug = true // leave on during development
+const debug = false // leave on during development
 
 // If forceStrict is set, the type-checker enforces additional
 // rules not specified by the Go 1 spec, but which will
@@ -31,11 +30,6 @@ const debug = true // leave on during development
 //   for both x and T have different signatures.
 //
 const forceStrict = false
-
-// If methodTypeParamsOk is set, type parameters are
-// permitted in method declarations (in interfaces, too).
-// Generalization and experimental feature.
-const methodTypeParamsOk = true
 
 // exprInfo stores information about an untyped expression.
 type exprInfo struct {
@@ -77,7 +71,29 @@ type importKey struct {
 // A dotImportKey describes a dot-imported object in the given scope.
 type dotImportKey struct {
 	scope *Scope
-	obj   Object
+	name  string
+}
+
+// An action describes a (delayed) action.
+type action struct {
+	f    func()      // action to be executed
+	desc *actionDesc // action description; may be nil, requires debug to be set
+}
+
+// If debug is set, describef sets a printf-formatted description for action a.
+// Otherwise, it is a no-op.
+func (a *action) describef(pos poser, format string, args ...interface{}) {
+	if debug {
+		a.desc = &actionDesc{pos, format, args}
+	}
+}
+
+// An actionDesc provides information on an action.
+// For debugging only.
+type actionDesc struct {
+	pos    poser
+	format string
+	args   []interface{}
 }
 
 // A Checker maintains the state of the type checker.
@@ -88,26 +104,35 @@ type Checker struct {
 	conf *Config
 	pkg  *Package
 	*Info
-	version version                     // accepted language version
-	nextId  uint64                      // unique Id for type parameters (first valid Id is 1)
-	objMap  map[Object]*declInfo        // maps package-level objects and (non-interface) methods to declaration info
-	impMap  map[importKey]*Package      // maps (import path, source directory) to (complete or fake) package
-	posMap  map[*Interface][]syntax.Pos // maps interface types to lists of embedded interface positions
-	typMap  map[string]*Named           // maps an instantiated named type hash to a *Named type
-	pkgCnt  map[string]int              // counts number of imported packages with a given name (for better error messages)
+	version version                // accepted language version
+	nextID  uint64                 // unique Id for type parameters (first valid Id is 1)
+	objMap  map[Object]*declInfo   // maps package-level objects and (non-interface) methods to declaration info
+	impMap  map[importKey]*Package // maps (import path, source directory) to (complete or fake) package
+
+	// pkgPathMap maps package names to the set of distinct import paths we've
+	// seen for that name, anywhere in the import graph. It is used for
+	// disambiguating package names in error messages.
+	//
+	// pkgPathMap is allocated lazily, so that we don't pay the price of building
+	// it on the happy path. seenPkgMap tracks the packages that we've already
+	// walked.
+	pkgPathMap map[string]map[string]bool
+	seenPkgMap map[*Package]bool
 
 	// information collected during type-checking of a set of package files
 	// (initialized by Files, valid only for the duration of check.Files;
 	// maps and lists are allocated on demand)
-	files        []*syntax.File            // list of package files
-	imports      []*PkgName                // list of imported packages
-	dotImportMap map[dotImportKey]*PkgName // maps dot-imported objects to the package they were dot-imported through
+	files         []*syntax.File              // list of package files
+	imports       []*PkgName                  // list of imported packages
+	dotImportMap  map[dotImportKey]*PkgName   // maps dot-imported objects to the package they were dot-imported through
+	recvTParamMap map[*syntax.Name]*TypeParam // maps blank receiver type parameters to their type
 
 	firstErr error                    // first error encountered
 	methods  map[*TypeName][]*Func    // maps package scope type names to associated non-blank (non-interface) methods
 	untyped  map[syntax.Expr]exprInfo // map of expressions without final type
-	delayed  []func()                 // stack of delayed action segments; segments are processed in FIFO order
+	delayed  []action                 // stack of delayed action segments; segments are processed in FIFO order
 	objPath  []Object                 // path of object dependencies during type inference (for cycle reporting)
+	defTypes []*Named                 // defined types created during type checking, for final validation.
 
 	// context within which the current object is type-checked
 	// (valid only for the duration of type-checking a specific object)
@@ -142,8 +167,12 @@ func (check *Checker) rememberUntyped(e syntax.Expr, lhs bool, mode operandMode,
 // either at the end of the current statement, or in case of a local constant
 // or variable declaration, before the constant or variable is in scope
 // (so that f still sees the scope before any new declarations).
-func (check *Checker) later(f func()) {
-	check.delayed = append(check.delayed, f)
+// later returns the pushed action so one can provide a description
+// via action.describef for debugging, if desired.
+func (check *Checker) later(f func()) *action {
+	i := len(check.delayed)
+	check.delayed = append(check.delayed, action{f: f})
+	return &check.delayed[i]
 }
 
 // push pushes obj onto the object path and returns its index in the path.
@@ -169,6 +198,11 @@ func NewChecker(conf *Config, pkg *Package, info *Info) *Checker {
 		conf = new(Config)
 	}
 
+	// make sure we have a context
+	if conf.Context == nil {
+		conf.Context = NewContext()
+	}
+
 	// make sure we have an info struct
 	if info == nil {
 		info = new(Info)
@@ -184,12 +218,8 @@ func NewChecker(conf *Config, pkg *Package, info *Info) *Checker {
 		pkg:     pkg,
 		Info:    info,
 		version: version,
-		nextId:  1,
 		objMap:  make(map[Object]*declInfo),
 		impMap:  make(map[importKey]*Package),
-		posMap:  make(map[*Interface][]syntax.Pos),
-		typMap:  make(map[string]*Named),
-		pkgCnt:  make(map[string]int),
 	}
 }
 
@@ -256,6 +286,7 @@ func (check *Checker) checkFiles(files []*syntax.File) (err error) {
 
 	print := func(msg string) {
 		if check.conf.Trace {
+			fmt.Println()
 			fmt.Println(msg)
 		}
 	}
@@ -272,6 +303,9 @@ func (check *Checker) checkFiles(files []*syntax.File) (err error) {
 	print("== processDelayed ==")
 	check.processDelayed(0) // incl. all functions
 
+	print("== expandDefTypes ==")
+	check.expandDefTypes()
+
 	print("== initOrder ==")
 	check.initOrder()
 
@@ -279,19 +313,19 @@ func (check *Checker) checkFiles(files []*syntax.File) (err error) {
 		print("== unusedImports ==")
 		check.unusedImports()
 	}
-	// no longer needed - release memory
-	check.imports = nil
-	check.dotImportMap = nil
 
 	print("== recordUntyped ==")
 	check.recordUntyped()
 
-	if check.Info != nil {
-		print("== sanitizeInfo ==")
-		sanitizeInfo(check.Info)
-	}
-
 	check.pkg.complete = true
+
+	// no longer needed - release memory
+	check.imports = nil
+	check.dotImportMap = nil
+	check.pkgPathMap = nil
+	check.seenPkgMap = nil
+	check.recvTParamMap = nil
+	check.defTypes = nil
 
 	// TODO(gri) There's more memory we should release at this point.
 
@@ -307,10 +341,65 @@ func (check *Checker) processDelayed(top int) {
 	// add more actions (such as nested functions), so
 	// this is a sufficiently bounded process.
 	for i := top; i < len(check.delayed); i++ {
-		check.delayed[i]() // may append to check.delayed
+		a := &check.delayed[i]
+		if check.conf.Trace && a.desc != nil {
+			fmt.Println()
+			check.trace(a.desc.pos.Pos(), "-- "+a.desc.format, a.desc.args...)
+		}
+		a.f() // may append to check.delayed
 	}
 	assert(top <= len(check.delayed)) // stack must not have shrunk
 	check.delayed = check.delayed[:top]
+}
+
+func (check *Checker) expandDefTypes() {
+	// Ensure that every defined type created in the course of type-checking has
+	// either non-*Named underlying, or is unresolved.
+	//
+	// This guarantees that we don't leak any types whose underlying is *Named,
+	// because any unresolved instances will lazily compute their underlying by
+	// substituting in the underlying of their origin. The origin must have
+	// either been imported or type-checked and expanded here, and in either case
+	// its underlying will be fully expanded.
+	for i := 0; i < len(check.defTypes); i++ {
+		n := check.defTypes[i]
+		switch n.underlying.(type) {
+		case nil:
+			if n.resolver == nil {
+				panic("nil underlying")
+			}
+		case *Named:
+			n.under() // n.under may add entries to check.defTypes
+		}
+		n.check = nil
+	}
+}
+
+func (check *Checker) record(x *operand) {
+	// convert x into a user-friendly set of values
+	// TODO(gri) this code can be simplified
+	var typ Type
+	var val constant.Value
+	switch x.mode {
+	case invalid:
+		typ = Typ[Invalid]
+	case novalue:
+		typ = (*Tuple)(nil)
+	case constant_:
+		typ = x.typ
+		val = x.val
+	default:
+		typ = x.typ
+	}
+	assert(x.expr != nil && typ != nil)
+
+	if isUntyped(typ) {
+		// delay type and value recording until we know the type
+		// or until the end of type checking
+		check.rememberUntyped(x.expr, false, x.mode, typ.(*Basic), val)
+	} else {
+		check.recordTypeAndValue(x.expr, x.mode, typ, val)
+	}
 }
 
 func (check *Checker) recordUntyped() {
@@ -345,14 +434,14 @@ func (check *Checker) recordTypeAndValue(x syntax.Expr, mode operandMode, typ Ty
 }
 
 func (check *Checker) recordBuiltinType(f syntax.Expr, sig *Signature) {
-	// f must be a (possibly parenthesized) identifier denoting a built-in
-	// (built-ins in package unsafe always produce a constant result and
-	// we don't record their signatures, so we don't see qualified idents
-	// here): record the signature for f and possible children.
+	// f must be a (possibly parenthesized, possibly qualified)
+	// identifier denoting a built-in (including unsafe's non-constant
+	// functions Add and Slice): record the signature for f and possible
+	// children.
 	for {
 		check.recordTypeAndValue(f, builtin, sig, nil)
 		switch p := f.(type) {
-		case *syntax.Name:
+		case *syntax.Name, *syntax.SelectorExpr:
 			return // we're done
 		case *syntax.ParenExpr:
 			f = p.X
@@ -388,12 +477,36 @@ func (check *Checker) recordCommaOkTypes(x syntax.Expr, a [2]Type) {
 	}
 }
 
-func (check *Checker) recordInferred(call syntax.Expr, targs []Type, sig *Signature) {
-	assert(call != nil)
-	assert(sig != nil)
-	if m := check.Inferred; m != nil {
-		m[call] = Inferred{targs, sig}
+// recordInstance records instantiation information into check.Info, if the
+// Instances map is non-nil. The given expr must be an ident, selector, or
+// index (list) expr with ident or selector operand.
+//
+// TODO(rfindley): the expr parameter is fragile. See if we can access the
+// instantiated identifier in some other way.
+func (check *Checker) recordInstance(expr syntax.Expr, targs []Type, typ Type) {
+	ident := instantiatedIdent(expr)
+	assert(ident != nil)
+	assert(typ != nil)
+	if m := check.Instances; m != nil {
+		m[ident] = Instance{NewTypeList(targs), typ}
 	}
+}
+
+func instantiatedIdent(expr syntax.Expr) *syntax.Name {
+	var selOrIdent syntax.Expr
+	switch e := expr.(type) {
+	case *syntax.IndexExpr:
+		selOrIdent = e.X
+	case *syntax.SelectorExpr, *syntax.Name:
+		selOrIdent = e
+	}
+	switch x := selOrIdent.(type) {
+	case *syntax.Name:
+		return x
+	case *syntax.SelectorExpr:
+		return x.Sel
+	}
+	panic("instantiated ident not found")
 }
 
 func (check *Checker) recordDef(id *syntax.Name, obj Object) {

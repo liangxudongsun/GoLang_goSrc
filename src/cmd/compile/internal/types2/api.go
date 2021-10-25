@@ -1,4 +1,3 @@
-// UNREVIEWED
 // Copyright 2012 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -22,8 +21,6 @@
 // Type inference computes the type (Type) of every expression (syntax.Expr)
 // and checks for compliance with the language specification.
 // Use Info.Types[expr].Type for the results of type inference.
-//
-// For a tutorial, see https://golang.org/s/types-tutorial.
 //
 package types2
 
@@ -56,6 +53,18 @@ func (err Error) Error() string {
 // parameters and more. Useful for debugging.
 func (err Error) FullError() string {
 	return fmt.Sprintf("%s: %s", err.Pos, err.Full)
+}
+
+// An ArgumentError holds an error that is associated with an argument.
+type ArgumentError struct {
+	index int
+	error
+}
+
+// Index returns the positional index of the argument associated with the
+// error.
+func (e ArgumentError) Index() int {
+	return e.index
 }
 
 // An Importer resolves import paths to Packages.
@@ -99,6 +108,10 @@ type ImporterFrom interface {
 // A Config specifies the configuration for type checking.
 // The zero value for Config is a ready-to-use default configuration.
 type Config struct {
+	// Context is the context used for resolving global identifiers. If nil, the
+	// type checker will initialize this field with a newly created context.
+	Context *Context
+
 	// GoVersion describes the accepted Go language version. The string
 	// must follow the format "go%d.%d" (e.g. "go1.12") or ist must be
 	// empty; an empty string indicates the latest language version.
@@ -109,13 +122,6 @@ type Config struct {
 	// If IgnoreFuncBodies is set, function bodies are not
 	// type-checked.
 	IgnoreFuncBodies bool
-
-	// If AcceptMethodTypeParams is set, methods may have type parameters.
-	AcceptMethodTypeParams bool
-
-	// If InferFromConstraints is set, constraint type inference is used
-	// if some function type arguments are missing.
-	InferFromConstraints bool
 
 	// If FakeImportC is set, `import "C"` (for packages requiring Cgo)
 	// declares an empty "C" package and errors are omitted for qualified
@@ -201,11 +207,19 @@ type Info struct {
 	// qualified identifiers are collected in the Uses map.
 	Types map[syntax.Expr]TypeAndValue
 
-	// Inferred maps calls of parameterized functions that use
-	// type inference to the inferred type arguments and signature
-	// of the function called. The recorded "call" expression may be
-	// an *ast.CallExpr (as in f(x)), or an *ast.IndexExpr (s in f[T]).
-	Inferred map[syntax.Expr]Inferred
+	// Instances maps identifiers denoting parameterized types or functions to
+	// their type arguments and instantiated type.
+	//
+	// For example, Instances will map the identifier for 'T' in the type
+	// instantiation T[int, string] to the type arguments [int, string] and
+	// resulting instantiated *Named type. Given a parameterized function
+	// func F[A any](A), Instances will map the identifier for 'F' in the call
+	// expression F(int(1)) to the inferred type arguments [int], and resulting
+	// instantiated *Signature.
+	//
+	// Invariant: Instantiating Uses[id].Type() with Instances[id].TypeArgs
+	// results in an equivalent of Instances[id].Type.
+	Instances map[*syntax.Name]Instance
 
 	// Defs maps identifiers to the objects they define (including
 	// package names, dots "." of dot-imports, and blank "_" identifiers).
@@ -362,11 +376,13 @@ func (tv TypeAndValue) HasOk() bool {
 	return tv.mode == commaok || tv.mode == mapindex
 }
 
-// Inferred reports the inferred type arguments and signature
-// for a parameterized function call that uses type inference.
-type Inferred struct {
-	Targs []Type
-	Sig   *Signature
+// Instance reports the type arguments and instantiated type for type and
+// function instantiations. For type instantiations, Type will be of dynamic
+// type *Named. For function instantiations, Type will be of dynamic type
+// *Signature.
+type Instance struct {
+	TypeArgs *TypeList
+	Type     Type
 }
 
 // An Initializer describes a package-level variable, or a list of variables in case
@@ -408,7 +424,7 @@ func (conf *Config) Check(path string, files []*syntax.File, info *Info) (*Packa
 
 // AssertableTo reports whether a value of type V can be asserted to have type T.
 func AssertableTo(V *Interface, T Type) bool {
-	m, _ := (*Checker)(nil).assertableTo(V, T, false)
+	m, _ := (*Checker)(nil).assertableTo(V, T)
 	return m == nil
 }
 
@@ -422,7 +438,7 @@ func AssignableTo(V, T Type) bool {
 // ConvertibleTo reports whether a value of type V is convertible to a value of type T.
 func ConvertibleTo(V, T Type) bool {
 	x := operand{mode: value, typ: V}
-	return x.convertibleTo(nil, T) // check not needed for non-constant x
+	return x.convertibleTo(nil, T, nil) // check not needed for non-constant x; if check == nil, cause can be nil
 }
 
 // Implements reports whether type V implements interface T.
@@ -434,11 +450,11 @@ func Implements(V Type, T *Interface) bool {
 // Identical reports whether x and y are identical types.
 // Receivers of Signature types are ignored.
 func Identical(x, y Type) bool {
-	return (*Checker)(nil).identical(x, y)
+	return identical(x, y, true, nil)
 }
 
 // IdenticalIgnoreTags reports whether x and y are identical types if tags are ignored.
 // Receivers of Signature types are ignored.
 func IdenticalIgnoreTags(x, y Type) bool {
-	return (*Checker)(nil).identicalIgnoreTags(x, y)
+	return identical(x, y, false, nil)
 }

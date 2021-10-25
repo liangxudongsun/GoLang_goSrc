@@ -1,4 +1,3 @@
-// UNREVIEWED
 // Copyright 2013 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -7,7 +6,10 @@
 
 package types2
 
-import "cmd/compile/internal/syntax"
+import (
+	"cmd/compile/internal/syntax"
+	"fmt"
+)
 
 // assignment reports whether x can be assigned to a variable of type T,
 // if necessary by attempting to convert untyped values to the appropriate
@@ -69,7 +71,7 @@ func (check *Checker) assignment(x *operand, T Type, context string) {
 	// x.typ is typed
 
 	// A generic (non-instantiated) function value cannot be assigned to a variable.
-	if sig := asSignature(x.typ); sig != nil && len(sig.tparams) > 0 {
+	if sig := asSignature(x.typ); sig != nil && sig.TypeParams().Len() > 0 {
 		check.errorf(x, "cannot use generic function %s without instantiation in %s", x, context)
 	}
 
@@ -131,6 +133,8 @@ func (check *Checker) initVar(lhs *Var, x *operand, context string) Type {
 		if lhs.typ == nil {
 			lhs.typ = Typ[Invalid]
 		}
+		// Note: This was reverted in go/types (https://golang.org/cl/292751).
+		// TODO(gri): decide what to do (also affects test/run.go exclusion list)
 		lhs.used = true // avoid follow-on "declared but not used" errors
 		return nil
 	}
@@ -152,6 +156,7 @@ func (check *Checker) initVar(lhs *Var, x *operand, context string) Type {
 
 	check.assignment(x, lhs.typ, context)
 	if x.mode == invalid {
+		lhs.used = true // avoid follow-on "declared but not used" errors
 		return nil
 	}
 
@@ -160,7 +165,7 @@ func (check *Checker) initVar(lhs *Var, x *operand, context string) Type {
 
 func (check *Checker) assignVar(lhs syntax.Expr, x *operand) Type {
 	if x.mode == invalid || x.typ == Typ[Invalid] {
-		check.useLHS(lhs)
+		check.use(lhs)
 		return nil
 	}
 
@@ -235,6 +240,28 @@ func (check *Checker) assignVar(lhs syntax.Expr, x *operand) Type {
 	return x.typ
 }
 
+func (check *Checker) assignError(rhs []syntax.Expr, nvars, nvals int) {
+	measure := func(x int, unit string) string {
+		s := fmt.Sprintf("%d %s", x, unit)
+		if x != 1 {
+			s += "s"
+		}
+		return s
+	}
+
+	vars := measure(nvars, "variable")
+	vals := measure(nvals, "value")
+	rhs0 := rhs[0]
+
+	if len(rhs) == 1 {
+		if call, _ := unparen(rhs0).(*syntax.CallExpr); call != nil {
+			check.errorf(rhs0, "assignment mismatch: %s but %s returns %s", vars, call.Fun, vals)
+			return
+		}
+	}
+	check.errorf(rhs0, "assignment mismatch: %s but %s", vars, vals)
+}
+
 // If returnPos is valid, initVars is called to type-check the assignment of
 // return expressions, and returnPos is the position of the return statement.
 func (check *Checker) initVars(lhs []*Var, orig_rhs []syntax.Expr, returnPos syntax.Pos) {
@@ -243,6 +270,7 @@ func (check *Checker) initVars(lhs []*Var, orig_rhs []syntax.Expr, returnPos syn
 	if len(lhs) != len(rhs) {
 		// invalidate lhs
 		for _, obj := range lhs {
+			obj.used = true // avoid declared but not used errors
 			if obj.typ == nil {
 				obj.typ = Typ[Invalid]
 			}
@@ -257,7 +285,11 @@ func (check *Checker) initVars(lhs []*Var, orig_rhs []syntax.Expr, returnPos syn
 			check.errorf(returnPos, "wrong number of return values (want %d, got %d)", len(lhs), len(rhs))
 			return
 		}
-		check.errorf(rhs[0], "cannot initialize %d variables with %d values", len(lhs), len(rhs))
+		if check.conf.CompilerErrorMessages {
+			check.assignError(orig_rhs, len(lhs), len(rhs))
+		} else {
+			check.errorf(rhs[0], "cannot initialize %d variables with %d values", len(lhs), len(rhs))
+		}
 		return
 	}
 
@@ -275,8 +307,18 @@ func (check *Checker) initVars(lhs []*Var, orig_rhs []syntax.Expr, returnPos syn
 		return
 	}
 
+	ok := true
 	for i, lhs := range lhs {
-		check.initVar(lhs, rhs[i], context)
+		if check.initVar(lhs, rhs[i], context) == nil {
+			ok = false
+		}
+	}
+
+	// avoid follow-on "declared but not used" errors if any initialization failed
+	if !ok {
+		for _, lhs := range lhs {
+			lhs.used = true
+		}
 	}
 }
 
@@ -284,14 +326,18 @@ func (check *Checker) assignVars(lhs, orig_rhs []syntax.Expr) {
 	rhs, commaOk := check.exprList(orig_rhs, len(lhs) == 2)
 
 	if len(lhs) != len(rhs) {
-		check.useLHS(lhs...)
+		check.use(lhs...)
 		// don't report an error if we already reported one
 		for _, x := range rhs {
 			if x.mode == invalid {
 				return
 			}
 		}
-		check.errorf(rhs[0], "cannot assign %d values to %d variables", len(rhs), len(lhs))
+		if check.conf.CompilerErrorMessages {
+			check.assignError(orig_rhs, len(lhs), len(rhs))
+		} else {
+			check.errorf(rhs[0], "cannot assign %d values to %d variables", len(rhs), len(lhs))
+		}
 		return
 	}
 
@@ -304,8 +350,26 @@ func (check *Checker) assignVars(lhs, orig_rhs []syntax.Expr) {
 		return
 	}
 
+	ok := true
 	for i, lhs := range lhs {
-		check.assignVar(lhs, rhs[i])
+		if check.assignVar(lhs, rhs[i]) == nil {
+			ok = false
+		}
+	}
+
+	// avoid follow-on "declared but not used" errors if any assignment failed
+	if !ok {
+		// don't call check.use to avoid re-evaluation of the lhs expressions
+		for _, lhs := range lhs {
+			if name, _ := unparen(lhs).(*syntax.Name); name != nil {
+				if obj := check.lookup(name.Value); obj != nil {
+					// see comment in assignVar
+					if v, _ := obj.(*Var); v != nil && v.pkg == check.pkg {
+						v.used = true
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -329,40 +393,59 @@ func (check *Checker) shortVarDecl(pos syntax.Pos, lhs, rhs []syntax.Expr) {
 	scope := check.scope
 
 	// collect lhs variables
-	var newVars []*Var
-	var lhsVars = make([]*Var, len(lhs))
+	seen := make(map[string]bool, len(lhs))
+	lhsVars := make([]*Var, len(lhs))
+	newVars := make([]*Var, 0, len(lhs))
+	hasErr := false
 	for i, lhs := range lhs {
-		var obj *Var
-		if ident, _ := lhs.(*syntax.Name); ident != nil {
-			// Use the correct obj if the ident is redeclared. The
-			// variable's scope starts after the declaration; so we
-			// must use Scope.Lookup here and call Scope.Insert
-			// (via check.declare) later.
-			name := ident.Value
-			if alt := scope.Lookup(name); alt != nil {
-				// redeclared object must be a variable
-				if alt, _ := alt.(*Var); alt != nil {
-					obj = alt
-				} else {
-					check.errorf(lhs, "cannot assign to %s", lhs)
-				}
-				check.recordUse(ident, alt)
-			} else {
-				// declare new variable, possibly a blank (_) variable
-				obj = NewVar(ident.Pos(), check.pkg, name, nil)
-				if name != "_" {
-					newVars = append(newVars, obj)
-				}
-				check.recordDef(ident, obj)
+		ident, _ := lhs.(*syntax.Name)
+		if ident == nil {
+			check.use(lhs)
+			check.errorf(lhs, "non-name %s on left side of :=", lhs)
+			hasErr = true
+			continue
+		}
+
+		name := ident.Value
+		if name != "_" {
+			if seen[name] {
+				check.errorf(lhs, "%s repeated on left side of :=", lhs)
+				hasErr = true
+				continue
 			}
-		} else {
-			check.useLHS(lhs)
-			check.errorf(lhs, "cannot declare %s", lhs)
+			seen[name] = true
 		}
-		if obj == nil {
-			obj = NewVar(lhs.Pos(), check.pkg, "_", nil) // dummy variable
+
+		// Use the correct obj if the ident is redeclared. The
+		// variable's scope starts after the declaration; so we
+		// must use Scope.Lookup here and call Scope.Insert
+		// (via check.declare) later.
+		if alt := scope.Lookup(name); alt != nil {
+			check.recordUse(ident, alt)
+			// redeclared object must be a variable
+			if obj, _ := alt.(*Var); obj != nil {
+				lhsVars[i] = obj
+			} else {
+				check.errorf(lhs, "cannot assign to %s", lhs)
+				hasErr = true
+			}
+			continue
 		}
+
+		// declare new variable
+		obj := NewVar(ident.Pos(), check.pkg, name, nil)
 		lhsVars[i] = obj
+		if name != "_" {
+			newVars = append(newVars, obj)
+		}
+		check.recordDef(ident, obj)
+	}
+
+	// create dummy variables where the lhs is invalid
+	for i, obj := range lhsVars {
+		if obj == nil {
+			lhsVars[i] = NewVar(lhs[i].Pos(), check.pkg, "_", nil)
+		}
 	}
 
 	check.initVars(lhsVars, rhs, nopos)
@@ -370,17 +453,18 @@ func (check *Checker) shortVarDecl(pos syntax.Pos, lhs, rhs []syntax.Expr) {
 	// process function literals in rhs expressions before scope changes
 	check.processDelayed(top)
 
-	// declare new variables
-	if len(newVars) > 0 {
-		// spec: "The scope of a constant or variable identifier declared inside
-		// a function begins at the end of the ConstSpec or VarSpec (ShortVarDecl
-		// for short variable declarations) and ends at the end of the innermost
-		// containing block."
-		scopePos := endPos(rhs[len(rhs)-1])
-		for _, obj := range newVars {
-			check.declare(scope, nil, obj, scopePos) // recordObject already called
-		}
-	} else {
+	if len(newVars) == 0 && !hasErr {
 		check.softErrorf(pos, "no new variables on left side of :=")
+		return
+	}
+
+	// declare new variables
+	// spec: "The scope of a constant or variable identifier declared inside
+	// a function begins at the end of the ConstSpec or VarSpec (ShortVarDecl
+	// for short variable declarations) and ends at the end of the innermost
+	// containing block."
+	scopePos := syntax.EndPos(rhs[len(rhs)-1])
+	for _, obj := range newVars {
+		check.declare(scope, nil, obj, scopePos) // id = nil: recordDef already called
 	}
 }

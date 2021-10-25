@@ -6,6 +6,7 @@ package build
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -28,9 +29,19 @@ type importReader struct {
 	pos  token.Position
 }
 
+var bom = []byte{0xef, 0xbb, 0xbf}
+
 func newImportReader(name string, r io.Reader) *importReader {
+	b := bufio.NewReader(r)
+	// Remove leading UTF-8 BOM.
+	// Per https://golang.org/ref/spec#Source_code_representation:
+	// a compiler may ignore a UTF-8-encoded byte order mark (U+FEFF)
+	// if it is the first Unicode code point in the source text.
+	if leadingBytes, err := b.Peek(3); err == nil && bytes.Equal(leadingBytes, bom) {
+		b.Discard(3)
+	}
 	return &importReader{
-		b: bufio.NewReader(r),
+		b: b,
 		pos: token.Position{
 			Filename: name,
 			Line:     1,
@@ -505,12 +516,12 @@ func parseGoEmbed(args string, pos token.Position) ([]fileEmbed, error) {
 			trimBytes(i)
 
 		case '`':
-			i := strings.Index(args[1:], "`")
-			if i < 0 {
+			var ok bool
+			path, _, ok = strings.Cut(args[1:], "`")
+			if !ok {
 				return nil, fmt.Errorf("invalid quoted string in //go:embed: %s", args)
 			}
-			path = args[1 : 1+i]
-			trimBytes(1 + i + 1)
+			trimBytes(1 + len(path) + 1)
 
 		case '"':
 			i := 1

@@ -11,6 +11,7 @@ import (
 	"cmd/link/internal/loader"
 	"cmd/link/internal/sym"
 	"fmt"
+	"internal/buildcfg"
 	"unicode"
 )
 
@@ -32,7 +33,7 @@ type deadcodePass struct {
 func (d *deadcodePass) init() {
 	d.ldr.InitReachable()
 	d.ifaceMethod = make(map[methodsig]bool)
-	if objabi.Experiment.FieldTrack {
+	if buildcfg.Experiment.FieldTrack {
 		d.ldr.Reachparent = make([]loader.Sym, d.ldr.NSym())
 	}
 	d.dynlink = d.ctxt.DynlinkingGo()
@@ -64,36 +65,28 @@ func (d *deadcodePass) init() {
 			}
 		}
 		names = append(names, *flagEntrySymbol)
-		// runtime.unreachableMethod is a function that will throw if called.
-		// We redirect unreachable methods to it.
-		names = append(names, "runtime.unreachableMethod")
-		if !d.ctxt.linkShared && d.ctxt.BuildMode != BuildModePlugin {
-			// runtime.buildVersion and runtime.modinfo are referenced in .go.buildinfo section
-			// (see function buildinfo in data.go). They should normally be reachable from the
-			// runtime. Just make it explicit, in case.
-			names = append(names, "runtime.buildVersion", "runtime.modinfo")
-		}
-		if d.ctxt.BuildMode == BuildModePlugin {
-			names = append(names, objabi.PathToPrefix(*flagPluginPath)+"..inittask", objabi.PathToPrefix(*flagPluginPath)+".main", "go.plugin.tabs")
+	}
+	// runtime.unreachableMethod is a function that will throw if called.
+	// We redirect unreachable methods to it.
+	names = append(names, "runtime.unreachableMethod")
+	if !d.ctxt.linkShared && d.ctxt.BuildMode != BuildModePlugin {
+		// runtime.buildVersion and runtime.modinfo are referenced in .go.buildinfo section
+		// (see function buildinfo in data.go). They should normally be reachable from the
+		// runtime. Just make it explicit, in case.
+		names = append(names, "runtime.buildVersion", "runtime.modinfo")
+	}
+	if d.ctxt.BuildMode == BuildModePlugin {
+		names = append(names, objabi.PathToPrefix(*flagPluginPath)+"..inittask", objabi.PathToPrefix(*flagPluginPath)+".main", "go.plugin.tabs")
 
-			// We don't keep the go.plugin.exports symbol,
-			// but we do keep the symbols it refers to.
-			exportsIdx := d.ldr.Lookup("go.plugin.exports", 0)
-			if exportsIdx != 0 {
-				relocs := d.ldr.Relocs(exportsIdx)
-				for i := 0; i < relocs.Count(); i++ {
-					d.mark(relocs.At(i).Sym(), 0)
-				}
+		// We don't keep the go.plugin.exports symbol,
+		// but we do keep the symbols it refers to.
+		exportsIdx := d.ldr.Lookup("go.plugin.exports", 0)
+		if exportsIdx != 0 {
+			relocs := d.ldr.Relocs(exportsIdx)
+			for i := 0; i < relocs.Count(); i++ {
+				d.mark(relocs.At(i).Sym(), 0)
 			}
 		}
-	}
-
-	dynexpMap := d.ctxt.cgo_export_dynamic
-	if d.ctxt.LinkMode == LinkExternal {
-		dynexpMap = d.ctxt.cgo_export_static
-	}
-	for exp := range dynexpMap {
-		names = append(names, exp)
 	}
 
 	if d.ctxt.Debugvlog > 1 {
@@ -103,8 +96,18 @@ func (d *deadcodePass) init() {
 	for _, name := range names {
 		// Mark symbol as a data/ABI0 symbol.
 		d.mark(d.ldr.Lookup(name, 0), 0)
-		// Also mark any Go functions (internal ABI).
-		d.mark(d.ldr.Lookup(name, sym.SymVerABIInternal), 0)
+		if abiInternalVer != 0 {
+			// Also mark any Go functions (internal ABI).
+			d.mark(d.ldr.Lookup(name, abiInternalVer), 0)
+		}
+	}
+
+	// All dynamic exports are roots.
+	for _, s := range d.ctxt.dynexp {
+		if d.ctxt.Debugvlog > 1 {
+			d.ctxt.Logf("deadcode start dynexp: %s<%d>\n", d.ldr.SymName(s), d.ldr.SymVersion(s))
+		}
+		d.mark(s, 0)
 	}
 }
 
@@ -131,7 +134,9 @@ func (d *deadcodePass) flood() {
 		methods = methods[:0]
 		for i := 0; i < relocs.Count(); i++ {
 			r := relocs.At(i)
-			if r.Weak() {
+			// When build with "-linkshared", we can't tell if the interface
+			// method in itab will be used or not. Ignore the weak attribute.
+			if r.Weak() && !(d.ctxt.linkShared && d.ldr.IsItab(symIdx)) {
 				continue
 			}
 			t := r.Type()
@@ -258,7 +263,7 @@ func (d *deadcodePass) mark(symIdx, parent loader.Sym) {
 	if symIdx != 0 && !d.ldr.AttrReachable(symIdx) {
 		d.wq.push(symIdx)
 		d.ldr.SetAttrReachable(symIdx, true)
-		if objabi.Experiment.FieldTrack && d.ldr.Reachparent[symIdx] == 0 {
+		if buildcfg.Experiment.FieldTrack && d.ldr.Reachparent[symIdx] == 0 {
 			d.ldr.Reachparent[symIdx] = parent
 		}
 		if *flagDumpDep {
@@ -326,8 +331,8 @@ func deadcode(ctxt *Link) {
 	d.init()
 	d.flood()
 
-	methSym := ldr.Lookup("reflect.Value.Method", sym.SymVerABIInternal)
-	methByNameSym := ldr.Lookup("reflect.Value.MethodByName", sym.SymVerABIInternal)
+	methSym := ldr.Lookup("reflect.Value.Method", abiInternalVer)
+	methByNameSym := ldr.Lookup("reflect.Value.MethodByName", abiInternalVer)
 
 	if ctxt.DynlinkingGo() {
 		// Exported methods may satisfy interfaces we don't know
@@ -407,6 +412,9 @@ func (d *deadcodePass) decodeMethodSig(ldr *loader.Loader, arch *sys.Arch, symId
 // Decode the method of interface type symbol symIdx at offset off.
 func (d *deadcodePass) decodeIfaceMethod(ldr *loader.Loader, arch *sys.Arch, symIdx loader.Sym, off int64) methodsig {
 	p := ldr.Data(symIdx)
+	if p == nil {
+		panic(fmt.Sprintf("missing symbol %q", ldr.SymName(symIdx)))
+	}
 	if decodetypeKind(arch, p)&kindMask != kindInterface {
 		panic(fmt.Sprintf("symbol %q is not an interface", ldr.SymName(symIdx)))
 	}

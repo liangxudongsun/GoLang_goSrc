@@ -7,71 +7,105 @@ package poll_test
 import (
 	"internal/poll"
 	"runtime"
-	"syscall"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// checkPipes returns true if all pipes are closed properly, false otherwise.
-func checkPipes(fds []int) bool {
-	for _, fd := range fds {
-		// Check if each pipe fd has been closed.
-		err := syscall.FcntlFlock(uintptr(fd), syscall.F_GETFD, nil)
-		if err == nil {
-			return false
+var closeHook atomic.Value // func(fd int)
+
+func init() {
+	closeFunc := poll.CloseFunc
+	poll.CloseFunc = func(fd int) (err error) {
+		if v := closeHook.Load(); v != nil {
+			if hook := v.(func(int)); hook != nil {
+				hook(fd)
+			}
 		}
+		return closeFunc(fd)
 	}
-	return true
 }
 
 func TestSplicePipePool(t *testing.T) {
 	const N = 64
 	var (
-		p   *poll.SplicePipe
-		ps  []*poll.SplicePipe
-		fds []int
-		err error
+		p          *poll.SplicePipe
+		ps         []*poll.SplicePipe
+		allFDs     []int
+		pendingFDs sync.Map // fd → struct{}{}
+		err        error
 	)
+
+	closeHook.Store(func(fd int) { pendingFDs.Delete(fd) })
+	t.Cleanup(func() { closeHook.Store((func(int))(nil)) })
+
 	for i := 0; i < N; i++ {
 		p, _, err = poll.GetPipe()
 		if err != nil {
-			t.Skip("failed to create pipe, skip this test")
+			t.Skipf("failed to create pipe due to error(%v), skip this test", err)
 		}
-		prfd, pwfd := poll.GetPipeFds(p)
-		fds = append(fds, prfd, pwfd)
+		_, pwfd := poll.GetPipeFds(p)
+		allFDs = append(allFDs, pwfd)
+		pendingFDs.Store(pwfd, struct{}{})
 		ps = append(ps, p)
 	}
 	for _, p = range ps {
 		poll.PutPipe(p)
 	}
 	ps = nil
+	p = nil
 
-	var ok bool
-	// Trigger garbage collection to free the pipes in sync.Pool and check whether or not
-	// those pipe buffers have been closed as we expected.
-	for i := 0; i < 5; i++ {
+	// Exploit the timeout of "go test" as a timer for the subsequent verification.
+	timeout := 5 * time.Minute
+	if deadline, ok := t.Deadline(); ok {
+		timeout = deadline.Sub(time.Now())
+		timeout -= timeout / 10 // Leave 10% headroom for cleanup.
+	}
+	expiredTime := time.NewTimer(timeout)
+	defer expiredTime.Stop()
+
+	// Trigger garbage collection repeatedly, waiting for all pipes in sync.Pool
+	// to either be deallocated and closed, or to time out.
+	for {
 		runtime.GC()
-		time.Sleep(time.Duration(i*100+10) * time.Millisecond)
-		if ok = checkPipes(fds); ok {
+		time.Sleep(10 * time.Millisecond)
+
+		// Detect whether all pipes are closed properly.
+		var leakedFDs []int
+		pendingFDs.Range(func(k, v interface{}) bool {
+			leakedFDs = append(leakedFDs, k.(int))
+			return true
+		})
+		if len(leakedFDs) == 0 {
 			break
 		}
-	}
 
-	if !ok {
-		t.Fatal("at least one pipe is still open")
+		select {
+		case <-expiredTime.C:
+			t.Logf("all descriptors: %v", allFDs)
+			t.Fatalf("leaked descriptors: %v", leakedFDs)
+		default:
+		}
 	}
 }
 
 func BenchmarkSplicePipe(b *testing.B) {
 	b.Run("SplicePipeWithPool", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			p, _, _ := poll.GetPipe()
+			p, _, err := poll.GetPipe()
+			if err != nil {
+				continue
+			}
 			poll.PutPipe(p)
 		}
 	})
 	b.Run("SplicePipeWithoutPool", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			p := poll.NewPipe()
+			if p == nil {
+				b.Skip("newPipe returned nil")
+			}
 			poll.DestroyPipe(p)
 		}
 	})
@@ -80,7 +114,10 @@ func BenchmarkSplicePipe(b *testing.B) {
 func BenchmarkSplicePipePoolParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			p, _, _ := poll.GetPipe()
+			p, _, err := poll.GetPipe()
+			if err != nil {
+				continue
+			}
 			poll.PutPipe(p)
 		}
 	})
@@ -90,6 +127,9 @@ func BenchmarkSplicePipeNativeParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			p := poll.NewPipe()
+			if p == nil {
+				b.Skip("newPipe returned nil")
+			}
 			poll.DestroyPipe(p)
 		}
 	})

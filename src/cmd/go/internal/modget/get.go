@@ -37,7 +37,7 @@ import (
 
 	"cmd/go/internal/base"
 	"cmd/go/internal/imports"
-	"cmd/go/internal/load"
+	"cmd/go/internal/modfetch"
 	"cmd/go/internal/modload"
 	"cmd/go/internal/par"
 	"cmd/go/internal/search"
@@ -49,14 +49,14 @@ import (
 )
 
 var CmdGet = &base.Command{
-	// Note: -d -u are listed explicitly because they are the most common get flags.
+	// Note: flags below are listed explicitly because they're the most common.
 	// Do not send CLs removing them because they're covered by [get flags].
-	UsageLine: "go get [-d] [-t] [-u] [-v] [build flags] [packages]",
+	UsageLine: "go get [-t] [-u] [-v] [build flags] [packages]",
 	Short:     "add dependencies to current module and install them",
 	Long: `
 Get resolves its command-line arguments to packages at specific module versions,
-updates go.mod to require those versions, downloads source code into the
-module cache, then builds and installs the named packages.
+updates go.mod to require those versions, and downloads source code into the
+module cache.
 
 To add a dependency for a package or upgrade it to its latest version:
 
@@ -72,17 +72,18 @@ To remove a dependency on a module and downgrade modules that require it:
 
 See https://golang.org/ref/mod#go-get for details.
 
-The 'go install' command may be used to build and install packages. When a
-version is specified, 'go install' runs in module-aware mode and ignores
-the go.mod file in the current directory. For example:
+In earlier versions of Go, 'go get' was used to build and install packages.
+Now, 'go get' is dedicated to adjusting dependencies in go.mod. 'go install'
+may be used to build and install commands instead. When a version is specified,
+'go install' runs in module-aware mode and ignores the go.mod file in the
+current directory. For example:
 
 	go install example.com/pkg@v1.2.3
 	go install example.com/pkg@latest
 
 See 'go help install' or https://golang.org/ref/mod#go-install for details.
 
-In addition to build flags (listed in 'go help build') 'go get' accepts the
-following flags.
+'go get' accepts the following flags.
 
 The -t flag instructs get to consider modules needed to build tests of
 packages specified on the command line.
@@ -97,15 +98,9 @@ but changes the default to select patch releases.
 When the -t and -u flags are used together, get will update
 test dependencies as well.
 
-The -d flag instructs get not to build or install packages. get will only
-update go.mod and download source code needed to build packages.
-
-Building and installing packages with get is deprecated. In a future release,
-the -d flag will be enabled by default, and 'go get' will be only be used to
-adjust dependencies of the current module. To install a package using
-dependencies from the current module, use 'go install'. To install a package
-ignoring the current module, use 'go install' with an @version suffix like
-"@latest" after each argument.
+The -x flag prints commands as they are executed. This is useful for
+debugging version control commands when a module is downloaded directly
+from a repository.
 
 For more about modules, see https://golang.org/ref/mod.
 
@@ -217,7 +212,7 @@ variable for future go command invocations.
 }
 
 var (
-	getD        = CmdGet.Flag.Bool("d", false, "")
+	getD        = CmdGet.Flag.Bool("d", true, "")
 	getF        = CmdGet.Flag.Bool("f", false, "")
 	getFix      = CmdGet.Flag.Bool("fix", false, "")
 	getM        = CmdGet.Flag.Bool("m", false, "")
@@ -262,32 +257,49 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 	case "", "upgrade", "patch":
 		// ok
 	default:
-		base.Fatalf("go get: unknown upgrade flag -u=%s", getU.rawVersion)
+		base.Fatalf("go: unknown upgrade flag -u=%s", getU.rawVersion)
+	}
+	// TODO(#43684): in the future (Go 1.20), warn that -d is a no-op.
+	if !*getD {
+		base.Fatalf("go: -d flag may not be disabled")
 	}
 	if *getF {
-		fmt.Fprintf(os.Stderr, "go get: -f flag is a no-op when using modules\n")
+		fmt.Fprintf(os.Stderr, "go: -f flag is a no-op when using modules\n")
 	}
 	if *getFix {
-		fmt.Fprintf(os.Stderr, "go get: -fix flag is a no-op when using modules\n")
+		fmt.Fprintf(os.Stderr, "go: -fix flag is a no-op when using modules\n")
 	}
 	if *getM {
-		base.Fatalf("go get: -m flag is no longer supported; consider -d to skip building packages")
+		base.Fatalf("go: -m flag is no longer supported")
 	}
 	if *getInsecure {
-		base.Fatalf("go get: -insecure flag is no longer supported; use GOINSECURE instead")
+		base.Fatalf("go: -insecure flag is no longer supported; use GOINSECURE instead")
 	}
-	load.ModResolveTests = *getT
+
+	modload.ForceUseModules = true
 
 	// Do not allow any updating of go.mod until we've applied
 	// all the requested changes and checked that the result matches
 	// what was requested.
-	modload.DisallowWriteGoMod()
+	modload.ExplicitWriteGoMod = true
 
 	// Allow looking up modules for import paths when outside of a module.
 	// 'go get' is expected to do this, unlike other commands.
 	modload.AllowMissingModuleImports()
 
-	modload.LoadModFile(ctx) // Initializes modload.Target.
+	// 'go get' no longer builds or installs packages, so there's nothing to do
+	// if there's no go.mod file.
+	// TODO(#40775): make modload.Init return ErrNoModRoot instead of exiting.
+	// We could handle that here by printing a different message.
+	modload.Init()
+	if !modload.HasModRoot() {
+		base.Fatalf("go: go.mod file not found in current directory or any parent directory.\n" +
+			"\t'go get' is no longer supported outside a module.\n" +
+			"\tTo build and install a command, use 'go install' with a version,\n" +
+			"\tlike 'go install example.com/cmd@latest'\n" +
+			"\tFor more information, see https://golang.org/doc/go-get-install-deprecation\n" +
+			"\tor run 'go help get' or 'go help install'.")
+	}
 
 	queries := parseArgs(ctx, args)
 
@@ -356,53 +368,14 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 			pkgPatterns = append(pkgPatterns, q.pattern)
 		}
 	}
-	r.checkPackagesAndRetractions(ctx, pkgPatterns)
-
-	// We've already downloaded modules (and identified direct and indirect
-	// dependencies) by loading packages in findAndUpgradeImports.
-	// So if -d is set, we're done after the module work.
-	//
-	// Otherwise, we need to build and install the packages matched by
-	// command line arguments.
-	// Note that 'go get -u' without arguments is equivalent to
-	// 'go get -u .', so we'll typically build the package in the current
-	// directory.
-	if !*getD && len(pkgPatterns) > 0 {
-		work.BuildInit()
-
-		var pkgs []*load.Package
-		for _, pkg := range load.PackagesAndErrors(ctx, pkgPatterns) {
-			if pkg.Error != nil {
-				var noGo *load.NoGoError
-				if errors.As(pkg.Error.Err, &noGo) {
-					if m := modload.PackageModule(pkg.ImportPath); m.Path == pkg.ImportPath {
-						// pkg is at the root of a module, and doesn't exist with the current
-						// build tags. Probably the user just wanted to change the version of
-						// that module — not also build the package — so suppress the error.
-						// (See https://golang.org/issue/33526.)
-						continue
-					}
-				}
-			}
-			pkgs = append(pkgs, pkg)
-		}
-		load.CheckPackageErrors(pkgs)
-		work.InstallPackages(ctx, pkgPatterns, pkgs)
-		// TODO(#40276): After Go 1.16, print a deprecation notice when building and
-		// installing main packages. 'go install pkg' or 'go install pkg@version'
-		// should be used instead. Give the specific argument to use if possible.
-	}
-
-	if !modload.HasModRoot() {
-		return
-	}
+	r.checkPackageProblems(ctx, pkgPatterns)
 
 	// Everything succeeded. Update go.mod.
 	oldReqs := reqsFromGoMod(modload.ModFile())
 
-	modload.AllowWriteGoMod()
-	modload.WriteGoMod()
-	modload.DisallowWriteGoMod()
+	if err := modload.WriteGoMod(ctx); err != nil {
+		base.Fatalf("go: %v", err)
+	}
 
 	newReqs := reqsFromGoMod(modload.ModFile())
 	r.reportChanges(oldReqs, newReqs)
@@ -419,7 +392,7 @@ func parseArgs(ctx context.Context, rawArgs []string) []*query {
 	for _, arg := range search.CleanPatterns(rawArgs) {
 		q, err := newQuery(arg)
 		if err != nil {
-			base.Errorf("go get: %v", err)
+			base.Errorf("go: %v", err)
 			continue
 		}
 
@@ -434,11 +407,11 @@ func parseArgs(ctx context.Context, rawArgs []string) []*query {
 		// if the argument has no version and either has no slash or refers to an existing file.
 		if strings.HasSuffix(q.raw, ".go") && q.rawVersion == "" {
 			if !strings.Contains(q.raw, "/") {
-				base.Errorf("go get %s: arguments must be package or module paths", q.raw)
+				base.Errorf("go: %s: arguments must be package or module paths", q.raw)
 				continue
 			}
 			if fi, err := os.Stat(q.raw); err == nil && !fi.IsDir() {
-				base.Errorf("go get: %s exists as a file, but 'go get' requires package arguments", q.raw)
+				base.Errorf("go: %s exists as a file, but 'go get' requires package arguments", q.raw)
 				continue
 			}
 		}
@@ -483,7 +456,12 @@ type versionReason struct {
 }
 
 func newResolver(ctx context.Context, queries []*query) *resolver {
-	buildList := modload.LoadAllModules(ctx)
+	// LoadModGraph also sets modload.Target, which is needed by various resolver
+	// methods.
+	const defaultGoVersion = ""
+	mg := modload.LoadModGraph(ctx, defaultGoVersion)
+
+	buildList := mg.BuildList()
 	initialVersion := make(map[string]string, len(buildList))
 	for _, m := range buildList {
 		initialVersion[m.Path] = m.Version
@@ -649,7 +627,9 @@ func (r *resolver) queryNone(ctx context.Context, q *query) {
 
 	if !q.isWildcard() {
 		q.pathOnce(q.pattern, func() pathSet {
-			if modload.HasModRoot() && q.pattern == modload.Target.Path {
+			hasModRoot := modload.HasModRoot()
+			if hasModRoot && modload.MainModules.Contains(q.pattern) {
+				v := module.Version{Path: q.pattern}
 				// The user has explicitly requested to downgrade their own module to
 				// version "none". This is not an entirely unreasonable request: it
 				// could plausibly mean “downgrade away everything that depends on any
@@ -660,7 +640,7 @@ func (r *resolver) queryNone(ctx context.Context, q *query) {
 				// However, neither of those behaviors would be consistent with the
 				// plain meaning of the query. To try to reduce confusion, reject the
 				// query explicitly.
-				return errSet(&modload.QueryMatchesMainModuleError{Pattern: q.pattern, Query: q.version})
+				return errSet(&modload.QueryMatchesMainModulesError{MainModules: []module.Version{v}, Pattern: q.pattern, Query: q.version})
 			}
 
 			return pathSet{mod: module.Version{Path: q.pattern, Version: "none"}}
@@ -672,8 +652,8 @@ func (r *resolver) queryNone(ctx context.Context, q *query) {
 			continue
 		}
 		q.pathOnce(curM.Path, func() pathSet {
-			if modload.HasModRoot() && curM == modload.Target {
-				return errSet(&modload.QueryMatchesMainModuleError{Pattern: q.pattern, Query: q.version})
+			if modload.HasModRoot() && curM.Version == "" && modload.MainModules.Contains(curM.Path) {
+				return errSet(&modload.QueryMatchesMainModulesError{MainModules: []module.Version{curM}, Pattern: q.pattern, Query: q.version})
 			}
 			return pathSet{mod: module.Version{Path: curM.Path, Version: "none"}}
 		})
@@ -692,28 +672,38 @@ func (r *resolver) performLocalQueries(ctx context.Context) {
 
 			// Absolute paths like C:\foo and relative paths like ../foo... are
 			// restricted to matching packages in the main module.
-			pkgPattern := modload.DirImportPath(q.pattern)
+			pkgPattern, mainModule := modload.MainModules.DirImportPath(ctx, q.pattern)
 			if pkgPattern == "." {
-				return errSet(fmt.Errorf("%s%s is not within module rooted at %s", q.pattern, absDetail, modload.ModRoot()))
+				modload.MustHaveModRoot()
+				var modRoots []string
+				for _, m := range modload.MainModules.Versions() {
+					modRoots = append(modRoots, modload.MainModules.ModRoot(m))
+				}
+				var plural string
+				if len(modRoots) != 1 {
+					plural = "s"
+				}
+				return errSet(fmt.Errorf("%s%s is not within module%s rooted at %s", q.pattern, absDetail, plural, strings.Join(modRoots, ", ")))
 			}
 
-			match := modload.MatchInModule(ctx, pkgPattern, modload.Target, imports.AnyTags())
+			match := modload.MatchInModule(ctx, pkgPattern, mainModule, imports.AnyTags())
 			if len(match.Errs) > 0 {
 				return pathSet{err: match.Errs[0]}
 			}
 
 			if len(match.Pkgs) == 0 {
 				if q.raw == "" || q.raw == "." {
-					return errSet(fmt.Errorf("no package in current directory"))
+					return errSet(fmt.Errorf("no package to get in current directory"))
 				}
 				if !q.isWildcard() {
-					return errSet(fmt.Errorf("%s%s is not a package in module rooted at %s", q.pattern, absDetail, modload.ModRoot()))
+					modload.MustHaveModRoot()
+					return errSet(fmt.Errorf("%s%s is not a package in module rooted at %s", q.pattern, absDetail, modload.MainModules.ModRoot(mainModule)))
 				}
 				search.WarnUnmatched([]*search.Match{match})
 				return pathSet{}
 			}
 
-			return pathSet{pkgMods: []module.Version{modload.Target}}
+			return pathSet{pkgMods: []module.Version{mainModule}}
 		})
 	}
 }
@@ -763,11 +753,12 @@ func (r *resolver) queryWildcard(ctx context.Context, q *query) {
 				return pathSet{}
 			}
 
-			if curM.Path == modload.Target.Path && !versionOkForMainModule(q.version) {
+			if modload.MainModules.Contains(curM.Path) && !versionOkForMainModule(q.version) {
 				if q.matchesPath(curM.Path) {
-					return errSet(&modload.QueryMatchesMainModuleError{
-						Pattern: q.pattern,
-						Query:   q.version,
+					return errSet(&modload.QueryMatchesMainModulesError{
+						MainModules: []module.Version{curM},
+						Pattern:     q.pattern,
+						Query:       q.version,
 					})
 				}
 
@@ -1128,12 +1119,13 @@ func (r *resolver) loadPackages(ctx context.Context, patterns []string, findPack
 		Tags:                     imports.AnyTags(),
 		VendorModulesInGOROOTSrc: true,
 		LoadTests:                *getT,
-		SilenceErrors:            true, // May be fixed by subsequent upgrades or downgrades.
+		AssumeRootsImported:      true, // After 'go get foo', imports of foo should build.
+		SilencePackageErrors:     true, // May be fixed by subsequent upgrades or downgrades.
 	}
 
 	opts.AllowPackage = func(ctx context.Context, path string, m module.Version) error {
-		if m.Path == "" || m == modload.Target {
-			// Packages in the standard library and main module are already at their
+		if m.Path == "" || m.Version == "" && modload.MainModules.Contains(m.Path) {
+			// Packages in the standard library and main modules are already at their
 			// latest (and only) available versions.
 			return nil
 		}
@@ -1300,7 +1292,7 @@ func (r *resolver) applyUpgrades(ctx context.Context, upgrades []pathSet) (chang
 	var tentative []module.Version
 	for _, cs := range upgrades {
 		if cs.err != nil {
-			base.Errorf("go get: %v", cs.err)
+			base.Errorf("go: %v", cs.err)
 			continue
 		}
 
@@ -1343,11 +1335,11 @@ func (r *resolver) disambiguate(cs pathSet) (filtered pathSet, isPackage bool, m
 			continue
 		}
 
-		if m.Path == modload.Target.Path {
-			if m.Version == modload.Target.Version {
+		if modload.MainModules.Contains(m.Path) {
+			if m.Version == "" {
 				return pathSet{}, true, m, true
 			}
-			// The main module can only be set to its own version.
+			// A main module can only be set to its own version.
 			continue
 		}
 
@@ -1439,25 +1431,33 @@ func (r *resolver) chooseArbitrarily(cs pathSet) (isPackage bool, m module.Versi
 	return false, cs.mod
 }
 
-// checkPackagesAndRetractions reloads packages for the given patterns and
-// reports missing and ambiguous package errors. It also reports loads and
-// reports retractions for resolved modules and modules needed to build
-// named packages.
+// checkPackageProblems reloads packages for the given patterns and reports
+// missing and ambiguous package errors. It also reports retractions and
+// deprecations for resolved modules and modules needed to build named packages.
+// It also adds a sum for each updated module in the build list if we had one
+// before and didn't get one while loading packages.
 //
 // We skip missing-package errors earlier in the process, since we want to
 // resolve pathSets ourselves, but at that point, we don't have enough context
 // to log the package-import chains leading to each error.
-func (r *resolver) checkPackagesAndRetractions(ctx context.Context, pkgPatterns []string) {
+func (r *resolver) checkPackageProblems(ctx context.Context, pkgPatterns []string) {
 	defer base.ExitIfErrors()
 
-	// Build a list of modules to load retractions for. Start with versions
-	// selected based on command line queries.
-	//
-	// This is a subset of the build list. If the main module has a lot of
-	// dependencies, loading retractions for the entire build list would be slow.
-	relevantMods := make(map[module.Version]struct{})
+	// Gather information about modules we might want to load retractions and
+	// deprecations for. Loading this metadata requires at least one version
+	// lookup per module, and we don't want to load information that's neither
+	// relevant nor actionable.
+	type modFlags int
+	const (
+		resolved modFlags = 1 << iota // version resolved by 'go get'
+		named                         // explicitly named on command line or provides a named package
+		hasPkg                        // needed to build named packages
+		direct                        // provides a direct dependency of the main module
+	)
+	relevantMods := make(map[module.Version]modFlags)
 	for path, reason := range r.resolvedVersion {
-		relevantMods[module.Version{Path: path, Version: reason.version}] = struct{}{}
+		m := module.Version{Path: path, Version: reason.version}
+		relevantMods[m] |= resolved
 	}
 
 	// Reload packages, reporting errors for missing and ambiguous imports.
@@ -1494,44 +1494,132 @@ func (r *resolver) checkPackagesAndRetractions(ctx context.Context, pkgPatterns 
 				base.SetExitStatus(1)
 				if ambiguousErr := (*modload.AmbiguousImportError)(nil); errors.As(err, &ambiguousErr) {
 					for _, m := range ambiguousErr.Modules {
-						relevantMods[m] = struct{}{}
+						relevantMods[m] |= hasPkg
 					}
 				}
 			}
 			if m := modload.PackageModule(pkg); m.Path != "" {
-				relevantMods[m] = struct{}{}
+				relevantMods[m] |= hasPkg
+			}
+		}
+		for _, match := range matches {
+			for _, pkg := range match.Pkgs {
+				m := modload.PackageModule(pkg)
+				relevantMods[m] |= named
 			}
 		}
 	}
 
-	// Load and report retractions.
-	type retraction struct {
-		m   module.Version
-		err error
-	}
-	retractions := make([]retraction, 0, len(relevantMods))
+	reqs := modload.LoadModFile(ctx)
 	for m := range relevantMods {
-		retractions = append(retractions, retraction{m: m})
+		if reqs.IsDirect(m.Path) {
+			relevantMods[m] |= direct
+		}
 	}
-	sort.Slice(retractions, func(i, j int) bool {
-		return retractions[i].m.Path < retractions[j].m.Path
-	})
-	for i := 0; i < len(retractions); i++ {
+
+	// Load retractions for modules mentioned on the command line and modules
+	// needed to build named packages. We care about retractions of indirect
+	// dependencies, since we might be able to upgrade away from them.
+	type modMessage struct {
+		m       module.Version
+		message string
+	}
+	retractions := make([]modMessage, 0, len(relevantMods))
+	for m, flags := range relevantMods {
+		if flags&(resolved|named|hasPkg) != 0 {
+			retractions = append(retractions, modMessage{m: m})
+		}
+	}
+	sort.Slice(retractions, func(i, j int) bool { return retractions[i].m.Path < retractions[j].m.Path })
+	for i := range retractions {
 		i := i
 		r.work.Add(func() {
 			err := modload.CheckRetractions(ctx, retractions[i].m)
 			if retractErr := (*modload.ModuleRetractedError)(nil); errors.As(err, &retractErr) {
-				retractions[i].err = err
+				retractions[i].message = err.Error()
 			}
 		})
 	}
+
+	// Load deprecations for modules mentioned on the command line. Only load
+	// deprecations for indirect dependencies if they're also direct dependencies
+	// of the main module. Deprecations of purely indirect dependencies are
+	// not actionable.
+	deprecations := make([]modMessage, 0, len(relevantMods))
+	for m, flags := range relevantMods {
+		if flags&(resolved|named) != 0 || flags&(hasPkg|direct) == hasPkg|direct {
+			deprecations = append(deprecations, modMessage{m: m})
+		}
+	}
+	sort.Slice(deprecations, func(i, j int) bool { return deprecations[i].m.Path < deprecations[j].m.Path })
+	for i := range deprecations {
+		i := i
+		r.work.Add(func() {
+			deprecation, err := modload.CheckDeprecation(ctx, deprecations[i].m)
+			if err != nil || deprecation == "" {
+				return
+			}
+			deprecations[i].message = modload.ShortMessage(deprecation, "")
+		})
+	}
+
+	// Load sums for updated modules that had sums before. When we update a
+	// module, we may update another module in the build list that provides a
+	// package in 'all' that wasn't loaded as part of this 'go get' command.
+	// If we don't add a sum for that module, builds may fail later.
+	// Note that an incidentally updated package could still import packages
+	// from unknown modules or from modules in the build list that we didn't
+	// need previously. We can't handle that case without loading 'all'.
+	sumErrs := make([]error, len(r.buildList))
+	for i := range r.buildList {
+		i := i
+		m := r.buildList[i]
+		mActual := m
+		if mRepl := modload.Replacement(m); mRepl.Path != "" {
+			mActual = mRepl
+		}
+		old := module.Version{Path: m.Path, Version: r.initialVersion[m.Path]}
+		if old.Version == "" {
+			continue
+		}
+		oldActual := old
+		if oldRepl := modload.Replacement(old); oldRepl.Path != "" {
+			oldActual = oldRepl
+		}
+		if mActual == oldActual || mActual.Version == "" || !modfetch.HaveSum(oldActual) {
+			continue
+		}
+		r.work.Add(func() {
+			if _, err := modfetch.DownloadZip(ctx, mActual); err != nil {
+				verb := "upgraded"
+				if semver.Compare(m.Version, old.Version) < 0 {
+					verb = "downgraded"
+				}
+				replaced := ""
+				if mActual != m {
+					replaced = fmt.Sprintf(" (replaced by %s)", mActual)
+				}
+				err = fmt.Errorf("%s %s %s => %s%s: error finding sum for %s: %v", verb, m.Path, old.Version, m.Version, replaced, mActual, err)
+				sumErrs[i] = err
+			}
+		})
+	}
+
 	<-r.work.Idle()
+
+	// Report deprecations, then retractions, then errors fetching sums.
+	// Only errors fetching sums are hard errors.
+	for _, mm := range deprecations {
+		if mm.message != "" {
+			fmt.Fprintf(os.Stderr, "go: module %s is deprecated: %s\n", mm.m.Path, mm.message)
+		}
+	}
 	var retractPath string
-	for _, r := range retractions {
-		if r.err != nil {
-			fmt.Fprintf(os.Stderr, "go: warning: %v\n", r.err)
+	for _, mm := range retractions {
+		if mm.message != "" {
+			fmt.Fprintf(os.Stderr, "go: warning: %v\n", mm.message)
 			if retractPath == "" {
-				retractPath = r.m.Path
+				retractPath = mm.m.Path
 			} else {
 				retractPath = "<module>"
 			}
@@ -1540,6 +1628,12 @@ func (r *resolver) checkPackagesAndRetractions(ctx context.Context, pkgPatterns 
 	if retractPath != "" {
 		fmt.Fprintf(os.Stderr, "go: to switch to the latest unretracted version, run:\n\tgo get %s@latest\n", retractPath)
 	}
+	for _, err := range sumErrs {
+		if err != nil {
+			base.Errorf("go: %v", err)
+		}
+	}
+	base.ExitIfErrors()
 }
 
 // reportChanges logs version changes to os.Stderr.
@@ -1591,13 +1685,13 @@ func (r *resolver) reportChanges(oldReqs, newReqs []module.Version) {
 	})
 	for _, c := range sortedChanges {
 		if c.old == "" {
-			fmt.Fprintf(os.Stderr, "go get: added %s %s\n", c.path, c.new)
+			fmt.Fprintf(os.Stderr, "go: added %s %s\n", c.path, c.new)
 		} else if c.new == "none" || c.new == "" {
-			fmt.Fprintf(os.Stderr, "go get: removed %s %s\n", c.path, c.old)
+			fmt.Fprintf(os.Stderr, "go: removed %s %s\n", c.path, c.old)
 		} else if semver.Compare(c.new, c.old) > 0 {
-			fmt.Fprintf(os.Stderr, "go get: upgraded %s %s => %s\n", c.path, c.old, c.new)
+			fmt.Fprintf(os.Stderr, "go: upgraded %s %s => %s\n", c.path, c.old, c.new)
 		} else {
-			fmt.Fprintf(os.Stderr, "go get: downgraded %s %s => %s\n", c.path, c.old, c.new)
+			fmt.Fprintf(os.Stderr, "go: downgraded %s %s => %s\n", c.path, c.old, c.new)
 		}
 	}
 
@@ -1615,10 +1709,11 @@ func (r *resolver) resolve(q *query, m module.Version) {
 		panic("internal error: resolving a module.Version with an empty path")
 	}
 
-	if m.Path == modload.Target.Path && m.Version != modload.Target.Version {
-		reportError(q, &modload.QueryMatchesMainModuleError{
-			Pattern: q.pattern,
-			Query:   q.version,
+	if modload.MainModules.Contains(m.Path) && m.Version != "" {
+		reportError(q, &modload.QueryMatchesMainModulesError{
+			MainModules: []module.Version{{Path: m.Path}},
+			Pattern:     q.pattern,
+			Query:       q.version,
 		})
 		return
 	}
@@ -1646,7 +1741,7 @@ func (r *resolver) updateBuildList(ctx context.Context, additions []module.Versi
 
 	resolved := make([]module.Version, 0, len(r.resolvedVersion))
 	for mPath, rv := range r.resolvedVersion {
-		if mPath != modload.Target.Path {
+		if !modload.MainModules.Contains(mPath) {
 			resolved = append(resolved, module.Version{Path: mPath, Version: rv.version})
 		}
 	}
@@ -1655,7 +1750,7 @@ func (r *resolver) updateBuildList(ctx context.Context, additions []module.Versi
 	if err != nil {
 		var constraint *modload.ConstraintError
 		if !errors.As(err, &constraint) {
-			base.Errorf("go get: %v", err)
+			base.Errorf("go: %v", err)
 			return false
 		}
 
@@ -1667,7 +1762,7 @@ func (r *resolver) updateBuildList(ctx context.Context, additions []module.Versi
 			return rv.reason.ResolvedString(module.Version{Path: m.Path, Version: rv.version})
 		}
 		for _, c := range constraint.Conflicts {
-			base.Errorf("go get: %v requires %v, not %v", reason(c.Source), c.Dep, reason(c.Constraint))
+			base.Errorf("go: %v requires %v, not %v", reason(c.Source), c.Dep, reason(c.Constraint))
 		}
 		return false
 	}
@@ -1675,7 +1770,8 @@ func (r *resolver) updateBuildList(ctx context.Context, additions []module.Versi
 		return false
 	}
 
-	r.buildList = modload.LoadAllModules(ctx)
+	const defaultGoVersion = ""
+	r.buildList = modload.LoadModGraph(ctx, defaultGoVersion).BuildList()
 	r.buildListVersion = make(map[string]string, len(r.buildList))
 	for _, m := range r.buildList {
 		r.buildListVersion[m.Path] = m.Version

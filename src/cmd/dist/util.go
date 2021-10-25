@@ -72,7 +72,7 @@ func run(dir string, mode int, cmd ...string) string {
 	}
 
 	xcmd := exec.Command(cmd[0], cmd[1:]...)
-	xcmd.Dir = dir
+	setDir(xcmd, dir)
 	var data []byte
 	var err error
 
@@ -249,6 +249,7 @@ func writefile(text, file string, flag int) {
 	if flag&writeExec != 0 {
 		mode = 0777
 	}
+	xremove(file) // in case of symlink tricks by misc/reboot test
 	err := ioutil.WriteFile(file, new, mode)
 	if err != nil {
 		fatalf("%v", err)

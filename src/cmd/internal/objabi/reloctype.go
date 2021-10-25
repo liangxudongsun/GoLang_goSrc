@@ -59,8 +59,6 @@ const (
 	// R_CALLMIPS (only used on mips64) resolves to non-PC-relative target address
 	// of a CALL (JAL) instruction, by encoding the address into the instruction.
 	R_CALLMIPS
-	// R_CALLRISCV marks RISC-V CALLs for stack checking.
-	R_CALLRISCV
 	R_CONST
 	R_PCREL
 	// R_TLS_LE, used on 386, amd64, and ARM, resolves to the offset of the
@@ -101,6 +99,9 @@ const (
 	// *rtype, and may be set to zero by the linker if it determines the method
 	// text is unreachable by the linked program.
 	R_METHODOFF
+	// R_KEEP tells the linker to keep the referred-to symbol in the final binary
+	// if the symbol containing the R_KEEP relocation is in the final binary.
+	R_KEEP
 	R_POWER_TOC
 	R_GOTPCREL
 	// R_JMPMIPS (only used on mips64) resolves to non-PC-relative target address
@@ -167,8 +168,8 @@ const (
 
 	// R_POWER_TLS_LE is used to implement the "local exec" model for tls
 	// access. It resolves to the offset of the thread-local symbol from the
-	// thread pointer (R13) and inserts this value into the low 16 bits of an
-	// instruction word.
+	// thread pointer (R13) and is split against a pair of instructions to
+	// support a 32 bit displacement.
 	R_POWER_TLS_LE
 
 	// R_POWER_TLS_IE is used to implement the "initial exec" model for tls access. It
@@ -178,10 +179,12 @@ const (
 	// symbol from the thread pointer (R13)).
 	R_POWER_TLS_IE
 
-	// R_POWER_TLS marks an X-form instruction such as "MOVD 0(R13)(R31*1), g" as
-	// accessing a particular thread-local symbol. It does not affect code generation
-	// but is used by the system linker when relaxing "initial exec" model code to
-	// "local exec" model code.
+	// R_POWER_TLS marks an X-form instruction such as "ADD R3,R13,R4" as completing
+	// a sequence of GOT-relative relocations to compute a TLS address. This can be
+	// used by the system linker to to rewrite the GOT-relative TLS relocation into a
+	// simpler thread-pointer relative relocation. See table 3.26 and 3.28 in the
+	// ppc64 elfv2 1.4 ABI on this transformation.  Likewise, the second argument
+	// (usually called RB in X-form instructions) is assumed to be R13.
 	R_POWER_TLS
 
 	// R_ADDRPOWER_DS is similar to R_ADDRPOWER above, but assumes the second
@@ -212,6 +215,15 @@ const (
 	R_ADDRPOWER_TOCREL_DS
 
 	// RISC-V.
+
+	// R_RISCV_CALL relocates a J-type instruction with a 21 bit PC-relative
+	// address.
+	R_RISCV_CALL
+
+	// R_RISCV_CALL_TRAMP is the same as R_RISCV_CALL but denotes the use of a
+	// trampoline, which we may be able to avoid during relocation. These are
+	// only used by the linker and are not emitted by the compiler or assembler.
+	R_RISCV_CALL_TRAMP
 
 	// R_RISCV_PCREL_ITYPE resolves a 32-bit PC-relative address using an
 	// AUIPC + I-type instruction pair.
@@ -269,7 +281,7 @@ const (
 // the target address in register or memory.
 func (r RelocType) IsDirectCall() bool {
 	switch r {
-	case R_CALL, R_CALLARM, R_CALLARM64, R_CALLMIPS, R_CALLPOWER, R_CALLRISCV:
+	case R_CALL, R_CALLARM, R_CALLARM64, R_CALLMIPS, R_CALLPOWER, R_RISCV_CALL, R_RISCV_CALL_TRAMP:
 		return true
 	}
 	return false

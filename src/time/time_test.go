@@ -9,6 +9,7 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"math/rand"
 	"os"
@@ -197,6 +198,28 @@ func TestNanosecondsToUTCAndBack(t *testing.T) {
 	if err := quick.Check(f32, cfg); err != nil {
 		t.Fatal(err)
 	}
+	if err := quick.Check(f, cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnixMilli(t *testing.T) {
+	f := func(msec int64) bool {
+		t := UnixMilli(msec)
+		return t.UnixMilli() == msec
+	}
+	cfg := &quick.Config{MaxCount: 10000}
+	if err := quick.Check(f, cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnixMicro(t *testing.T) {
+	f := func(usec int64) bool {
+		t := UnixMicro(usec)
+		return t.UnixMicro() == usec
+	}
+	cfg := &quick.Config{MaxCount: 10000}
 	if err := quick.Check(f, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +768,6 @@ var notEncodableTimes = []struct {
 	time Time
 	want string
 }{
-	{Date(0, 1, 2, 3, 4, 5, 6, FixedZone("", 1)), "Time.MarshalBinary: zone offset has fractional minute"},
 	{Date(0, 1, 2, 3, 4, 5, 6, FixedZone("", -1*60)), "Time.MarshalBinary: unexpected zone offset"},
 	{Date(0, 1, 2, 3, 4, 5, 6, FixedZone("", -32769*60)), "Time.MarshalBinary: unexpected zone offset"},
 	{Date(0, 1, 2, 3, 4, 5, 6, FixedZone("", 32768*60)), "Time.MarshalBinary: unexpected zone offset"},
@@ -864,8 +886,13 @@ var parseDurationTests = []struct {
 	{"9223372036854775807ns", (1<<63 - 1) * Nanosecond},
 	{"9223372036854775.807us", (1<<63 - 1) * Nanosecond},
 	{"9223372036s854ms775us807ns", (1<<63 - 1) * Nanosecond},
-	// large negative value
-	{"-9223372036854775807ns", -1<<63 + 1*Nanosecond},
+	{"-9223372036854775808ns", -1 << 63 * Nanosecond},
+	{"-9223372036854775.808us", -1 << 63 * Nanosecond},
+	{"-9223372036s854ms775us808ns", -1 << 63 * Nanosecond},
+	// largest negative value
+	{"-9223372036854775808ns", -1 << 63 * Nanosecond},
+	// largest negative round trip value, see https://golang.org/issue/48629
+	{"-2562047h47m16.854775808s", -1 << 63 * Nanosecond},
 	// huge string; issue 15011.
 	{"0.100000000000000000000h", 6 * Minute},
 	// This value tests the first overflow check in leadingFraction.
@@ -895,12 +922,15 @@ var parseDurationErrorTests = []struct {
 	{".s", `".s"`},
 	{"+.s", `"+.s"`},
 	{"1d", `"1d"`},
+	{"\x85\x85", `"\x85\x85"`},
+	{"\xffff", `"\xffff"`},
+	{"hello \xffff world", `"hello \xffff world"`},
+	{"\uFFFD", `"\xef\xbf\xbd"`},                                             // utf8.RuneError
+	{"\uFFFD hello \uFFFD world", `"\xef\xbf\xbd hello \xef\xbf\xbd world"`}, // utf8.RuneError
 	// overflow
 	{"9223372036854775810ns", `"9223372036854775810ns"`},
 	{"9223372036854775808ns", `"9223372036854775808ns"`},
-	// largest negative value of type int64 in nanoseconds should fail
-	// see https://go-review.googlesource.com/#/c/2461/
-	{"-9223372036854775808ns", `"-9223372036854775808ns"`},
+	{"-9223372036854775809ns", `"-9223372036854775809ns"`},
 	{"9223372036854776us", `"9223372036854776us"`},
 	{"3000000h", `"3000000h"`},
 	{"9223372036854775.808us", `"9223372036854775.808us"`},
@@ -919,6 +949,19 @@ func TestParseDurationErrors(t *testing.T) {
 }
 
 func TestParseDurationRoundTrip(t *testing.T) {
+	// https://golang.org/issue/48629
+	max0 := Duration(math.MaxInt64)
+	max1, err := ParseDuration(max0.String())
+	if err != nil || max0 != max1 {
+		t.Errorf("round-trip failed: %d => %q => %d, %v", max0, max0.String(), max1, err)
+	}
+
+	min0 := Duration(math.MinInt64)
+	min1, err := ParseDuration(min0.String())
+	if err != nil || min0 != min1 {
+		t.Errorf("round-trip failed: %d => %q => %d, %v", min0, min0.String(), min1, err)
+	}
+
 	for i := 0; i < 100; i++ {
 		// Resolutions finer than milliseconds will result in
 		// imprecise round-trips.
@@ -959,6 +1002,8 @@ var mallocTest = []struct {
 }{
 	{0, `time.Now()`, func() { t = Now() }},
 	{0, `time.Now().UnixNano()`, func() { u = Now().UnixNano() }},
+	{0, `time.Now().UnixMilli()`, func() { u = Now().UnixMilli() }},
+	{0, `time.Now().UnixMicro()`, func() { u = Now().UnixMicro() }},
 }
 
 func TestCountMallocs(t *testing.T) {
@@ -1249,6 +1294,8 @@ var defaultLocTests = []struct {
 
 	{"Unix", func(t1, t2 Time) bool { return t1.Unix() == t2.Unix() }},
 	{"UnixNano", func(t1, t2 Time) bool { return t1.UnixNano() == t2.UnixNano() }},
+	{"UnixMilli", func(t1, t2 Time) bool { return t1.UnixMilli() == t2.UnixMilli() }},
+	{"UnixMicro", func(t1, t2 Time) bool { return t1.UnixMicro() == t2.UnixMicro() }},
 
 	{"MarshalBinary", func(t1, t2 Time) bool {
 		a1, b1 := t1.MarshalBinary()
@@ -1298,6 +1345,18 @@ func BenchmarkNow(b *testing.B) {
 func BenchmarkNowUnixNano(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		u = Now().UnixNano()
+	}
+}
+
+func BenchmarkNowUnixMilli(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		u = Now().UnixMilli()
+	}
+}
+
+func BenchmarkNowUnixMicro(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		u = Now().UnixMicro()
 	}
 }
 
@@ -1391,6 +1450,37 @@ func TestMarshalBinaryZeroTime(t *testing.T) {
 	}
 	if t1 != t0 {
 		t.Errorf("t0=%#v\nt1=%#v\nwant identical structures", t0, t1)
+	}
+}
+
+func TestMarshalBinaryVersion2(t *testing.T) {
+	t0, err := Parse(RFC3339, "1880-01-01T00:00:00Z")
+	if err != nil {
+		t.Errorf("Failed to parse time, error = %v", err)
+	}
+	loc, err := LoadLocation("US/Eastern")
+	if err != nil {
+		t.Errorf("Failed to load location, error = %v", err)
+	}
+	t1 := t0.In(loc)
+	b, err := t1.MarshalBinary()
+	if err != nil {
+		t.Errorf("Failed to Marshal, error = %v", err)
+	}
+
+	t2 := Time{}
+	err = t2.UnmarshalBinary(b)
+	if err != nil {
+		t.Errorf("Failed to Unmarshal, error = %v", err)
+	}
+
+	if !(t0.Equal(t1) && t1.Equal(t2)) {
+		if !t0.Equal(t1) {
+			t.Errorf("The result t1: %+v after Marshal is not matched original t0: %+v", t1, t0)
+		}
+		if !t1.Equal(t2) {
+			t.Errorf("The result t2: %+v after Unmarshal is not matched original t1: %+v", t2, t1)
+		}
 	}
 }
 

@@ -153,6 +153,9 @@ func (a *AuxCall) Reg(i *regInfo, c *Config) *regInfo {
 func (a *AuxCall) ABI() *abi.ABIConfig {
 	return a.abiInfo.Config()
 }
+func (a *AuxCall) ABIInfo() *abi.ABIParamResultInfo {
+	return a.abiInfo
+}
 func (a *AuxCall) ResultReg(c *Config) *regInfo {
 	if a.abiInfo.OutRegistersUsed() == 0 {
 		return a.reg
@@ -171,6 +174,8 @@ func (a *AuxCall) ResultReg(c *Config) *regInfo {
 	return a.reg
 }
 
+// For ABI register index r, returns the (dense) register number used in
+// SSA backend.
 func archRegForAbiReg(r abi.RegIndex, c *Config) uint8 {
 	var m int8
 	if int(r) < len(c.intParamRegs) {
@@ -179,6 +184,13 @@ func archRegForAbiReg(r abi.RegIndex, c *Config) uint8 {
 		m = c.floatParamRegs[int(r)-len(c.intParamRegs)]
 	}
 	return uint8(m)
+}
+
+// For ABI register index r, returns the register number used in the obj
+// package (assembler).
+func ObjRegForAbiReg(r abi.RegIndex, c *Config) int16 {
+	m := archRegForAbiReg(r, c)
+	return c.registers[m].objNum
 }
 
 // ArgWidth returns the amount of stack needed for all the inputs
@@ -242,13 +254,13 @@ func (a *AuxCall) TypeOfArg(which int64) *types.Type {
 
 // SizeOfResult returns the size of result which (indexed 0, 1, etc).
 func (a *AuxCall) SizeOfResult(which int64) int64 {
-	return a.TypeOfResult(which).Width
+	return a.TypeOfResult(which).Size()
 }
 
 // SizeOfArg returns the size of argument which (indexed 0, 1, etc).
 // If the call is to a method, the receiver is the first argument (i.e., index 0)
 func (a *AuxCall) SizeOfArg(which int64) int64 {
-	return a.TypeOfArg(which).Width
+	return a.TypeOfArg(which).Size()
 }
 
 // NResults returns the number of results
@@ -457,6 +469,7 @@ const (
 	BoundsSlice3BU                      // ... with unsigned high
 	BoundsSlice3C                       // 3-arg slicing operation, 0 <= low <= high failed
 	BoundsSlice3CU                      // ... with unsigned low
+	BoundsConvert                       // conversion to array pointer failed
 	BoundsKindCount
 )
 
@@ -484,7 +497,8 @@ func boundsABI(b int64) int {
 	case BoundsSlice3Alen,
 		BoundsSlice3AlenU,
 		BoundsSlice3Acap,
-		BoundsSlice3AcapU:
+		BoundsSlice3AcapU,
+		BoundsConvert:
 		return 0
 	case BoundsSliceAlen,
 		BoundsSliceAlenU,

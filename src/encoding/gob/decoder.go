@@ -138,9 +138,17 @@ func (dec *Decoder) nextUint() uint64 {
 // decoded. If this is an interface value, it can be ignored by
 // resetting that buffer.
 func (dec *Decoder) decodeTypeSequence(isInterface bool) typeId {
+	firstMessage := true
 	for dec.err == nil {
 		if dec.buf.Len() == 0 {
 			if !dec.recvMessage() {
+				// We can only return io.EOF if the input was empty.
+				// If we read one or more type spec messages,
+				// require a data item message to follow.
+				// If we hit an EOF before that, then give ErrUnexpectedEOF.
+				if !firstMessage && dec.err == io.EOF {
+					dec.err = io.ErrUnexpectedEOF
+				}
 				break
 			}
 		}
@@ -166,6 +174,7 @@ func (dec *Decoder) decodeTypeSequence(isInterface bool) typeId {
 			}
 			dec.nextUint()
 		}
+		firstMessage = false
 	}
 	return -1
 }
@@ -218,7 +227,7 @@ func (dec *Decoder) DecodeValue(v reflect.Value) error {
 	return dec.err
 }
 
-// If debug.go is compiled into the program , debugFunc prints a human-readable
+// If debug.go is compiled into the program, debugFunc prints a human-readable
 // representation of the gob data read from r by calling that file's Debug function.
 // Otherwise it is nil.
 var debugFunc func(io.Reader)

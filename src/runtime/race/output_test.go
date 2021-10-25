@@ -20,11 +20,7 @@ import (
 )
 
 func TestOutput(t *testing.T) {
-	pkgdir, err := os.MkdirTemp("", "go-build-race-output")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(pkgdir)
+	pkgdir := t.TempDir()
 	out, err := exec.Command(testenv.GoToolPath(t), "install", "-race", "-pkgdir="+pkgdir, "testing").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go install -race: %v\n%s", err, out)
@@ -35,11 +31,7 @@ func TestOutput(t *testing.T) {
 			t.Logf("test %v runs only on %v, skipping: ", test.name, test.goos)
 			continue
 		}
-		dir, err := os.MkdirTemp("", "go-build")
-		if err != nil {
-			t.Fatalf("failed to create temp directory: %v", err)
-		}
-		defer os.RemoveAll(dir)
+		dir := t.TempDir()
 		source := "main.go"
 		if test.run == "test" {
 			source = "main_test.go"
@@ -156,7 +148,7 @@ exit status 66
 package main
 func main() {
 	done := make(chan bool)
-	x := 0
+	x := 0; _ = x
 	go func() {
 		x = 42
 		done <- true
@@ -170,7 +162,7 @@ func main() {
 package main
 func main() {
 	done := make(chan bool)
-	x := 0
+	x := 0; _ = x
 	go func() {
 		x = 42
 		done <- true
@@ -186,7 +178,7 @@ func main() {
 package main
 func main() {
 	done := make(chan bool)
-	x := 0
+	x := 0; _ = x
 	go func() {
 		x = 42
 		done <- true

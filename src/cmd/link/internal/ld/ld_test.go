@@ -5,6 +5,7 @@
 package ld
 
 import (
+	"bytes"
 	"debug/pe"
 	"fmt"
 	"internal/testenv"
@@ -131,10 +132,16 @@ func TestArchiveBuildInvokeWithExec(t *testing.T) {
 	}
 }
 
-func TestPPC64LargeTextSectionSplitting(t *testing.T) {
-	// The behavior we're checking for is of interest only on ppc64.
-	if !strings.HasPrefix(runtime.GOARCH, "ppc64") {
-		t.Skip("test useful only for ppc64")
+func TestLargeTextSectionSplitting(t *testing.T) {
+	switch runtime.GOARCH {
+	case "ppc64", "ppc64le":
+	case "arm64":
+		if runtime.GOOS == "darwin" {
+			break
+		}
+		fallthrough
+	default:
+		t.Skipf("text section splitting is not done in %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 
 	testenv.MustHaveGoBuild(t)
@@ -142,19 +149,28 @@ func TestPPC64LargeTextSectionSplitting(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	// NB: the use of -ldflags=-debugppc64textsize=1048576 tells the linker to
+	// NB: the use of -ldflags=-debugtextsize=1048576 tells the linker to
 	// split text sections at a size threshold of 1M instead of the
-	// architected limit of 67M. The choice of building cmd/go is
-	// arbitrary; we just need something sufficiently large that uses
+	// architected limit of 67M or larger. The choice of building cmd/go
+	// is arbitrary; we just need something sufficiently large that uses
 	// external linking.
 	exe := filepath.Join(dir, "go.exe")
-	out, eerr := exec.Command(testenv.GoToolPath(t), "build", "-o", exe, "-ldflags=-linkmode=external -debugppc64textsize=1048576", "cmd/go").CombinedOutput()
-	if eerr != nil {
-		t.Fatalf("build failure: %s\n%s\n", eerr, string(out))
+	out, err := exec.Command(testenv.GoToolPath(t), "build", "-o", exe, "-ldflags=-linkmode=external -debugtextsize=1048576", "cmd/go").CombinedOutput()
+	if err != nil {
+		t.Fatalf("build failure: %s\n%s\n", err, string(out))
+	}
+
+	// Check that we did split text sections.
+	out, err = exec.Command(testenv.GoToolPath(t), "tool", "nm", exe).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nm failure: %s\n%s\n", err, string(out))
+	}
+	if !bytes.Contains(out, []byte("runtime.text.1")) {
+		t.Errorf("runtime.text.1 not found, text section not split?")
 	}
 
 	// Result should be runnable.
-	_, err := exec.Command(exe, "version").CombinedOutput()
+	_, err = exec.Command(exe, "version").CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +183,8 @@ func TestWindowsBuildmodeCSharedASLR(t *testing.T) {
 	default:
 		t.Skip("skipping windows amd64/386 only test")
 	}
+
+	testenv.MustHaveCGO(t)
 
 	t.Run("aslr", func(t *testing.T) {
 		testWindowsBuildmodeCSharedASLR(t, true)

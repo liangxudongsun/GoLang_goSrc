@@ -283,7 +283,7 @@ func (a *Addr) SetConst(v int64) {
 // Each Prog is charged to a specific source line in the debug information,
 // specified by Pos.Line().
 // Every Prog has a Ctxt field that defines its context.
-// For performance reasons, Progs usually are usually bulk allocated, cached, and reused;
+// For performance reasons, Progs are usually bulk allocated, cached, and reused;
 // those bulk allocators should always be used, rather than new(Prog).
 //
 // The other fields not yet mentioned are for use by the back ends and should
@@ -485,6 +485,7 @@ type FuncInfo struct {
 	GCLocals           *LSym
 	StackObjects       *LSym
 	OpenCodedDeferInfo *LSym
+	ArgInfo            *LSym // argument info for traceback
 
 	FuncInfoSym *LSym
 }
@@ -603,6 +604,48 @@ func ParseABI(abistr string) (ABI, bool) {
 	}
 }
 
+// ABISet is a bit set of ABI values.
+type ABISet uint8
+
+const (
+	// ABISetCallable is the set of all ABIs any function could
+	// potentially be called using.
+	ABISetCallable ABISet = (1 << ABI0) | (1 << ABIInternal)
+)
+
+// Ensure ABISet is big enough to hold all ABIs.
+var _ ABISet = 1 << (ABICount - 1)
+
+func ABISetOf(abi ABI) ABISet {
+	return 1 << abi
+}
+
+func (a *ABISet) Set(abi ABI, value bool) {
+	if value {
+		*a |= 1 << abi
+	} else {
+		*a &^= 1 << abi
+	}
+}
+
+func (a *ABISet) Get(abi ABI) bool {
+	return (*a>>abi)&1 != 0
+}
+
+func (a ABISet) String() string {
+	s := "{"
+	for i := ABI(0); a != 0; i++ {
+		if a&(1<<i) != 0 {
+			if s != "{" {
+				s += ","
+			}
+			s += i.String()
+			a &^= 1 << i
+		}
+	}
+	return s + "}"
+}
+
 // Attribute is a set of symbol attributes.
 type Attribute uint32
 
@@ -657,6 +700,9 @@ const (
 	// convert between ABI0 and ABIInternal calling conventions.
 	AttrABIWrapper
 
+	// IsPcdata indicates this is a pcdata symbol.
+	AttrPcdata
+
 	// attrABIBase is the value at which the ABI is encoded in
 	// Attribute. This must be last; all bits after this are
 	// assumed to be an ABI value.
@@ -684,6 +730,7 @@ func (a *Attribute) Indexed() bool            { return a.load()&AttrIndexed != 0
 func (a *Attribute) UsedInIface() bool        { return a.load()&AttrUsedInIface != 0 }
 func (a *Attribute) ContentAddressable() bool { return a.load()&AttrContentAddressable != 0 }
 func (a *Attribute) ABIWrapper() bool         { return a.load()&AttrABIWrapper != 0 }
+func (a *Attribute) IsPcdata() bool           { return a.load()&AttrPcdata != 0 }
 
 func (a *Attribute) Set(flag Attribute, value bool) {
 	for {
@@ -783,15 +830,14 @@ func (*LSym) CanBeAnSSAAux() {}
 
 type Pcln struct {
 	// Aux symbols for pcln
-	Pcsp        *LSym
-	Pcfile      *LSym
-	Pcline      *LSym
-	Pcinline    *LSym
-	Pcdata      []*LSym
-	Funcdata    []*LSym
-	Funcdataoff []int64
-	UsedFiles   map[goobj.CUFileIndex]struct{} // file indices used while generating pcfile
-	InlTree     InlTree                        // per-function inlining tree extracted from the global tree
+	Pcsp      *LSym
+	Pcfile    *LSym
+	Pcline    *LSym
+	Pcinline  *LSym
+	Pcdata    []*LSym
+	Funcdata  []*LSym
+	UsedFiles map[goobj.CUFileIndex]struct{} // file indices used while generating pcfile
+	InlTree   InlTree                        // per-function inlining tree extracted from the global tree
 }
 
 type Reloc struct {
@@ -858,16 +904,6 @@ type Link struct {
 	// state for writing objects
 	Text []*LSym
 	Data []*LSym
-
-	// ABIAliases are text symbols that should be aliased to all
-	// ABIs. These symbols may only be referenced and not defined
-	// by this object, since the need for an alias may appear in a
-	// different object than the definition. Hence, this
-	// information can't be carried in the symbol definition.
-	//
-	// TODO(austin): Replace this with ABI wrappers once the ABIs
-	// actually diverge.
-	ABIAliases []*LSym
 
 	// Constant symbols (e.g. $i64.*) are data symbols created late
 	// in the concurrent phase. To ensure a deterministic order, we

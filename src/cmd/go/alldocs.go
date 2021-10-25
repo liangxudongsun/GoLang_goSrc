@@ -131,8 +131,19 @@
 //
 // 	-asmflags '[pattern=]arg list'
 // 		arguments to pass on each go tool asm invocation.
+// 	-buildinfo
+// 		Whether to stamp binaries with build flags. By default, the compiler name
+// 		(gc or gccgo), toolchain flags (like -gcflags), and environment variables
+// 		containing flags (like CGO_CFLAGS) are stamped into binaries. Use
+// 		-buildinfo=false to omit build information. See also -buildvcs.
 // 	-buildmode mode
 // 		build mode to use. See 'go help buildmode' for more.
+// 	-buildvcs
+// 		Whether to stamp binaries with version control information. By default,
+// 		version control information is stamped into a binary if the main package
+// 		and the main module containing it are in the repository containing the
+// 		current directory (if there is a repository). Use -buildvcs=false to
+// 		omit version control information. See also -buildinfo.
 // 	-compiler name
 // 		name of compiler to use, as in runtime.Compiler (gccgo or gc).
 // 	-gccgoflags '[pattern=]arg list'
@@ -167,6 +178,14 @@
 // 		directory, but it is not accessed. When -modfile is specified, an
 // 		alternate go.sum file is also used: its path is derived from the
 // 		-modfile flag by trimming the ".mod" extension and appending ".sum".
+// 	-workfile file
+// 		in module aware mode, use the given go.work file as a workspace file.
+// 		By default or when -workfile is "auto", the go command searches for a
+// 		file named go.work in the current directory and then containing directories
+// 		until one is found. If a valid go.work file is found, the modules
+// 		specified will collectively be used as the main modules. If -workfile
+// 		is "off", or a go.work file is not found in "auto" mode, workspace
+// 		mode is disabled.
 // 	-overlay file
 // 		read a JSON config file that provides an overlay for build operations.
 // 		The file is a JSON struct with a single field, named 'Replace', that
@@ -174,8 +193,8 @@
 // 		a build will run as if the disk file path exists with the contents
 // 		given by the backing file paths, or as if the disk file path does not
 // 		exist if its backing file path is empty. Support for the -overlay flag
-// 		has some limitations:importantly, cgo files included from outside the
-// 		include path must be  in the same directory as the Go package they are
+// 		has some limitations: importantly, cgo files included from outside the
+// 		include path must be in the same directory as the Go package they are
 // 		included from, and overlays will not appear when binaries and tests are
 // 		run through go run and go test respectively.
 // 	-pkgdir dir
@@ -198,6 +217,8 @@
 // 		a program to use to invoke toolchain programs like vet and asm.
 // 		For example, instead of running asm, the go command will run
 // 		'cmd args /path/to/asm <arguments for asm>'.
+// 		The TOOLEXEC_IMPORTPATH environment variable will be set,
+// 		matching 'go list -f {{.ImportPath}}' for the package being built.
 //
 // The -asmflags, -gccgoflags, -gcflags, and -ldflags flags accept a
 // space-separated list of arguments to pass to an underlying tool
@@ -282,6 +303,13 @@
 // download cache, including unpacked source code of versioned
 // dependencies.
 //
+// The -fuzzcache flag causes clean to remove files stored in the Go build
+// cache for fuzz testing. The fuzzing engine caches files that expand
+// code coverage, so removing them may make fuzzing less effective until
+// new inputs are found that provide the same coverage. These files are
+// distinct from those stored in testdata directory; clean does not remove
+// those files.
+//
 // For more about build flags, see 'go help build'.
 //
 // For more about specifying packages, see 'go help packages'.
@@ -291,7 +319,7 @@
 //
 // Usage:
 //
-// 	go doc [-u] [-c] [package|[package.]symbol[.methodOrField]]
+// 	go doc [doc flags] [package|[package.]symbol[.methodOrField]]
 //
 // Doc prints the documentation comments associated with the item identified by its
 // arguments (a package, const, func, type, var, method, or struct field)
@@ -481,7 +509,7 @@
 // files. Those commands can run any process but the intent is to
 // create or update Go source files.
 //
-// Go generate is never run automatically by go build, go get, go test,
+// Go generate is never run automatically by go build, go test,
 // and so on. It must be run explicitly.
 //
 // Go generate scans the file for directives, which are lines of
@@ -596,11 +624,11 @@
 //
 // Usage:
 //
-// 	go get [-d] [-t] [-u] [-v] [build flags] [packages]
+// 	go get [-t] [-u] [-v] [build flags] [packages]
 //
 // Get resolves its command-line arguments to packages at specific module versions,
-// updates go.mod to require those versions, downloads source code into the
-// module cache, then builds and installs the named packages.
+// updates go.mod to require those versions, and downloads source code into the
+// module cache.
 //
 // To add a dependency for a package or upgrade it to its latest version:
 //
@@ -616,17 +644,18 @@
 //
 // See https://golang.org/ref/mod#go-get for details.
 //
-// The 'go install' command may be used to build and install packages. When a
-// version is specified, 'go install' runs in module-aware mode and ignores
-// the go.mod file in the current directory. For example:
+// In earlier versions of Go, 'go get' was used to build and install packages.
+// Now, 'go get' is dedicated to adjusting dependencies in go.mod. 'go install'
+// may be used to build and install commands instead. When a version is specified,
+// 'go install' runs in module-aware mode and ignores the go.mod file in the
+// current directory. For example:
 //
 // 	go install example.com/pkg@v1.2.3
 // 	go install example.com/pkg@latest
 //
 // See 'go help install' or https://golang.org/ref/mod#go-install for details.
 //
-// In addition to build flags (listed in 'go help build') 'go get' accepts the
-// following flags.
+// 'go get' accepts the following flags.
 //
 // The -t flag instructs get to consider modules needed to build tests of
 // packages specified on the command line.
@@ -641,15 +670,9 @@
 // When the -t and -u flags are used together, get will update
 // test dependencies as well.
 //
-// The -d flag instructs get not to build or install packages. get will only
-// update go.mod and download source code needed to build packages.
-//
-// Building and installing packages with get is deprecated. In a future release,
-// the -d flag will be enabled by default, and 'go get' will be only be used to
-// adjust dependencies of the current module. To install a package using
-// dependencies from the current module, use 'go install'. To install a package
-// ignoring the current module, use 'go install' with an @version suffix like
-// "@latest" after each argument.
+// The -x flag prints commands as they are executed. This is useful for
+// debugging version control commands when a module is downloaded directly
+// from a repository.
 //
 // For more about modules, see https://golang.org/ref/mod.
 //
@@ -692,14 +715,17 @@
 //
 // - All arguments must refer to packages in the same module at the same version.
 //
+// - Package path arguments must refer to main packages. Pattern arguments
+// will only match main packages.
+//
 // - No module is considered the "main" module. If the module containing
 // packages named on the command line has a go.mod file, it must not contain
 // directives (replace and exclude) that would cause it to be interpreted
 // differently than if it were the main module. The module must not require
 // a higher version of itself.
 //
-// - Package path arguments must refer to main packages. Pattern arguments
-// will only match main packages.
+// - Vendor directories are not used in any module. (Vendor directories are not
+// included in the module zip files downloaded by 'go install'.)
 //
 // If the arguments don't have version suffixes, "go install" may run in
 // module-aware mode or GOPATH mode, depending on the GO111MODULE environment
@@ -841,6 +867,7 @@
 //         UseAllFiles   bool     // use files regardless of +build lines, file names
 //         Compiler      string   // compiler to assume when computing target paths
 //         BuildTags     []string // build constraints to match in +build lines
+//         ToolTags      []string // toolchain-specific build constraints
 //         ReleaseTags   []string // releases the current release is compatible with
 //         InstallSuffix string   // suffix to use in the name of the install dir
 //     }
@@ -1021,8 +1048,10 @@
 //
 // 	download    download modules to local cache
 // 	edit        edit go.mod from tools or scripts
+// 	editwork    edit go.work from tools or scripts
 // 	graph       print module requirement graph
 // 	init        initialize new module in current directory
+// 	initwork    initialize workspace file
 // 	tidy        add missing and remove unused modules
 // 	vendor      make vendored copy of dependencies
 // 	verify      verify dependencies have expected content
@@ -1075,7 +1104,7 @@
 //
 // Usage:
 //
-// 	go mod edit [editing flags] [go.mod]
+// 	go mod edit [editing flags] [-fmt|-print|-json] [go.mod]
 //
 // Edit provides a command-line interface for editing go.mod,
 // for use primarily by tools or scripts. It reads only go.mod;
@@ -1134,17 +1163,22 @@
 // writing it back to go.mod. The JSON output corresponds to these Go types:
 //
 // 	type Module struct {
-// 		Path string
+// 		Path    string
 // 		Version string
 // 	}
 //
 // 	type GoMod struct {
-// 		Module  Module
+// 		Module  ModPath
 // 		Go      string
 // 		Require []Require
 // 		Exclude []Module
 // 		Replace []Replace
 // 		Retract []Retract
+// 	}
+//
+// 	type ModPath struct {
+// 		Path       string
+// 		Deprecated string
 // 	}
 //
 // 	type Require struct {
@@ -1174,16 +1208,91 @@
 // See https://golang.org/ref/mod#go-mod-edit for more about 'go mod edit'.
 //
 //
+// Edit go.work from tools or scripts
+//
+// Usage:
+//
+// 	go mod editwork [editing flags] [go.work]
+//
+// Editwork provides a command-line interface for editing go.work,
+// for use primarily by tools or scripts. It only reads go.work;
+// it does not look up information about the modules involved.
+// If no file is specified, editwork looks for a go.work file in the current
+// directory and its parent directories
+//
+// The editing flags specify a sequence of editing operations.
+//
+// The -fmt flag reformats the go.work file without making other changes.
+// This reformatting is also implied by any other modifications that use or
+// rewrite the go.mod file. The only time this flag is needed is if no other
+// flags are specified, as in 'go mod editwork -fmt'.
+//
+// The -directory=path and -dropdirectory=path flags
+// add and drop a directory from the go.work files set of module directories.
+//
+// The -replace=old[@v]=new[@v] flag adds a replacement of the given
+// module path and version pair. If the @v in old@v is omitted, a
+// replacement without a version on the left side is added, which applies
+// to all versions of the old module path. If the @v in new@v is omitted,
+// the new path should be a local module root directory, not a module
+// path. Note that -replace overrides any redundant replacements for old[@v],
+// so omitting @v will drop existing replacements for specific versions.
+//
+// The -dropreplace=old[@v] flag drops a replacement of the given
+// module path and version pair. If the @v is omitted, a replacement without
+// a version on the left side is dropped.
+//
+// The -directory, -dropdirectory, -replace, and -dropreplace,
+// editing flags may be repeated, and the changes are applied in the order given.
+//
+// The -go=version flag sets the expected Go language version.
+//
+// The -print flag prints the final go.work in its text format instead of
+// writing it back to go.mod.
+//
+// The -json flag prints the final go.work file in JSON format instead of
+// writing it back to go.mod. The JSON output corresponds to these Go types:
+//
+// 	type Module struct {
+// 		Path    string
+// 		Version string
+// 	}
+//
+// 	type GoWork struct {
+// 		Go        string
+// 		Directory []Directory
+// 		Replace   []Replace
+// 	}
+//
+// 	type Directory struct {
+// 		Path       string
+// 		ModulePath string
+// 	}
+//
+// 	type Replace struct {
+// 		Old Module
+// 		New Module
+// 	}
+//
+// See the workspaces design proposal at
+// https://go.googlesource.com/proposal/+/master/design/45713-workspace.md for
+// more information.
+//
+//
 // Print module requirement graph
 //
 // Usage:
 //
-// 	go mod graph
+// 	go mod graph [-go=version]
 //
 // Graph prints the module requirement graph (with replacements applied)
 // in text form. Each line in the output has two space-separated fields: a module
 // and one of its requirements. Each module is identified as a string of the form
 // path@version, except for the main module, which has no @version suffix.
+//
+// The -go flag causes graph to report the module graph as loaded by the
+// given Go version, instead of the version indicated by the 'go' directive
+// in the go.mod file.
 //
 // See https://golang.org/ref/mod#go-mod-graph for more about 'go mod graph'.
 //
@@ -1192,7 +1301,7 @@
 //
 // Usage:
 //
-// 	go mod init [module]
+// 	go mod init [module-path]
 //
 // Init initializes and writes a new go.mod file in the current directory, in
 // effect creating a new module rooted at the current directory. The go.mod file
@@ -1209,11 +1318,28 @@
 // See https://golang.org/ref/mod#go-mod-init for more about 'go mod init'.
 //
 //
+// Initialize workspace file
+//
+// Usage:
+//
+// 	go mod initwork [moddirs]
+//
+// go mod initwork initializes and writes a new go.work file in the current
+// directory, in effect creating a new workspace at the current directory.
+//
+// go mod initwork optionally accepts paths to the workspace modules as arguments.
+// If the argument is omitted, an empty workspace with no modules will be created.
+//
+// See the workspaces design proposal at
+// https://go.googlesource.com/proposal/+/master/design/45713-workspace.md for
+// more information.
+//
+//
 // Add missing and remove unused modules
 //
 // Usage:
 //
-// 	go mod tidy [-e] [-v]
+// 	go mod tidy [-e] [-v] [-go=version] [-compat=version]
 //
 // Tidy makes sure go.mod matches the source code in the module.
 // It adds any missing modules necessary to build the current module's
@@ -1226,6 +1352,20 @@
 //
 // The -e flag causes tidy to attempt to proceed despite errors
 // encountered while loading packages.
+//
+// The -go flag causes tidy to update the 'go' directive in the go.mod
+// file to the given version, which may change which module dependencies
+// are retained as explicit requirements in the go.mod file.
+// (Go versions 1.17 and higher retain more requirements in order to
+// support lazy module loading.)
+//
+// The -compat flag preserves any additional checksums needed for the
+// 'go' command from the indicated major Go release to successfully load
+// the module graph, and causes tidy to error out if that version of the
+// 'go' command would load any imported package from a different module
+// version. By default, tidy acts as if the -compat flag were set to the
+// version prior to the one indicated by the 'go' directive in the go.mod
+// file.
 //
 // See https://golang.org/ref/mod#go-mod-tidy for more about 'go mod tidy'.
 //
@@ -1310,9 +1450,20 @@
 // 	go run [build flags] [-exec xprog] package [arguments...]
 //
 // Run compiles and runs the named main Go package.
-// Typically the package is specified as a list of .go source files from a single directory,
-// but it may also be an import path, file system path, or pattern
+// Typically the package is specified as a list of .go source files from a single
+// directory, but it may also be an import path, file system path, or pattern
 // matching a single known package, as in 'go run .' or 'go run my/cmd'.
+//
+// If the package argument has a version suffix (like @latest or @v1.0.0),
+// "go run" builds the program in module-aware mode, ignoring the go.mod file in
+// the current directory or any parent directory, if there is one. This is useful
+// for running programs without affecting the dependencies of the main module.
+//
+// If the package argument doesn't have a version suffix, "go run" may run in
+// module-aware mode or GOPATH mode, depending on the GO111MODULE environment
+// variable and the presence of a go.mod file. See 'go help modules' for details.
+// If module-aware mode is enabled, "go run" runs in the context of the main
+// module.
 //
 // By default, 'go run' runs the compiled binary directly: 'a.out arguments...'.
 // If the -exec flag is given, 'go run' invokes the binary using xprog:
@@ -1350,8 +1501,8 @@
 //
 // 'Go test' recompiles each package along with any files with names matching
 // the file pattern "*_test.go".
-// These additional files can contain test functions, benchmark functions, and
-// example functions. See 'go help testfunc' for more.
+// These additional files can contain test functions, benchmark functions, fuzz
+// targets and example functions. See 'go help testfunc' for more.
 // Each listed package causes the execution of a separate test binary.
 // Files whose names begin with "_" (including "_test.go") or "." are ignored.
 //
@@ -1368,7 +1519,8 @@
 // used. That subset is: 'atomic', 'bool', 'buildtags', 'errorsas',
 // 'ifaceassert', 'nilfunc', 'printf', and 'stringintconv'. You can see
 // the documentation for these and other vet tests via "go doc cmd/vet".
-// To disable the running of go vet, use the -vet=off flag.
+// To disable the running of go vet, use the -vet=off flag. To run all
+// checks, use the -vet=all flag.
 //
 // All test output and summary lines are printed to the go command's
 // standard output, even if the test printed them to its own standard
@@ -1408,17 +1560,17 @@
 //
 // The rule for a match in the cache is that the run involves the same
 // test binary and the flags on the command line come entirely from a
-// restricted set of 'cacheable' test flags, defined as -cpu, -list,
-// -parallel, -run, -short, and -v. If a run of go test has any test
-// or non-test flags outside this set, the result is not cached. To
-// disable test caching, use any test flag or argument other than the
-// cacheable flags. The idiomatic way to disable test caching explicitly
-// is to use -count=1. Tests that open files within the package's source
-// root (usually $GOPATH) or that consult environment variables only
-// match future runs in which the files and environment variables are unchanged.
-// A cached test result is treated as executing in no time at all,
-// so a successful package test result will be cached and reused
-// regardless of -timeout setting.
+// restricted set of 'cacheable' test flags, defined as -benchtime, -cpu,
+// -list, -parallel, -run, -short, -timeout, -failfast, and -v.
+// If a run of go test has any test or non-test flags outside this set,
+// the result is not cached. To disable test caching, use any test flag
+// or argument other than the cacheable flags. The idiomatic way to disable
+// test caching explicitly is to use -count=1. Tests that open files within
+// the package's source root (usually $GOPATH) or that consult environment
+// variables only match future runs in which the files and environment
+// variables are unchanged. A cached test result is treated as executing
+// in no time at all,so a successful package test result will be cached and
+// reused regardless of -timeout setting.
 //
 // In addition to the build flags, the flags handled by 'go test' itself are:
 //
@@ -1535,7 +1687,7 @@
 //
 // A build constraint, also known as a build tag, is a line comment that begins
 //
-// 	// +build
+// 	//go:build
 //
 // that lists the conditions under which a file should be included in the package.
 // Constraints may appear in any kind of source file (not just Go), but
@@ -1543,30 +1695,20 @@
 // only by blank lines and other line comments. These rules mean that in Go
 // files a build constraint must appear before the package clause.
 //
-// To distinguish build constraints from package documentation, a series of
-// build constraints must be followed by a blank line.
+// To distinguish build constraints from package documentation,
+// a build constraint should be followed by a blank line.
 //
-// A build constraint is evaluated as the OR of space-separated options.
-// Each option evaluates as the AND of its comma-separated terms.
-// Each term consists of letters, digits, underscores, and dots.
-// A term may be negated with a preceding !.
-// For example, the build constraint:
+// A build constraint is evaluated as an expression containing options
+// combined by ||, &&, and ! operators and parentheses. Operators have
+// the same meaning as in Go.
 //
-// 	// +build linux,386 darwin,!cgo
+// For example, the following build constraint constrains a file to
+// build when the "linux" and "386" constraints are satisfied, or when
+// "darwin" is satisfied and "cgo" is not:
 //
-// corresponds to the boolean formula:
+// 	//go:build (linux && 386) || (darwin && !cgo)
 //
-// 	(linux AND 386) OR (darwin AND (NOT cgo))
-//
-// A file may have multiple build constraints. The overall constraint is the AND
-// of the individual constraints. That is, the build constraints:
-//
-// 	// +build linux darwin
-// 	// +build amd64
-//
-// corresponds to the boolean formula:
-//
-// 	(linux OR darwin) AND amd64
+// It is an error for a file to have more than one //go:build line.
 //
 // During a particular build, the following words are satisfied:
 //
@@ -1604,23 +1746,27 @@
 //
 // To keep a file from being considered for the build:
 //
-// 	// +build ignore
+// 	//go:build ignore
 //
 // (any other unsatisfied word will work as well, but "ignore" is conventional.)
 //
 // To build a file only when using cgo, and only on Linux and OS X:
 //
-// 	// +build linux,cgo darwin,cgo
+// 	//go:build cgo && (linux || darwin)
 //
 // Such a file is usually paired with another file implementing the
 // default functionality for other systems, which in this case would
 // carry the constraint:
 //
-// 	// +build !linux,!darwin !cgo
+// 	//go:build !(cgo && (linux || darwin))
 //
 // Naming a file dns_windows.go will cause it to be included only when
 // building the package for Windows; similarly, math_386.s will be included
 // only when building the package for 32-bit x86.
+//
+// Go versions 1.16 and earlier used a different syntax for build constraints,
+// with a "// +build" prefix. The gofmt command will add an equivalent //go:build
+// constraint when encountering the older syntax.
 //
 //
 // Build modes
@@ -1714,6 +1860,13 @@
 // The go command also caches successful package test results.
 // See 'go help test' for details. Running 'go clean -testcache' removes
 // all cached test results (but not cached build results).
+//
+// The go command also caches values used in fuzzing with 'go test -fuzz',
+// specifically, values that expanded code coverage when passed to a
+// fuzz function. These values are not used for regular building and
+// testing, but they're stored in a subdirectory of the build cache.
+// Running 'go clean -fuzzcache' removes all cached fuzzing values.
+// This may make fuzzing less effective, temporarily.
 //
 // The GODEBUG environment variable can enable printing of debugging
 // information about the state of the cache:
@@ -1854,12 +2007,19 @@
 // 	GO386
 // 		For GOARCH=386, how to implement floating point instructions.
 // 		Valid values are sse2 (default), softfloat.
+// 	GOAMD64
+// 		For GOARCH=amd64, the microarchitecture level for which to compile.
+// 		Valid values are v1 (default), v2, v3, v4.
+// 		See https://en.wikipedia.org/wiki/X86-64#Microarchitecture_levels.
 // 	GOMIPS
 // 		For GOARCH=mips{,le}, whether to use floating point instructions.
 // 		Valid values are hardfloat (default), softfloat.
 // 	GOMIPS64
 // 		For GOARCH=mips64{,le}, whether to use floating point instructions.
 // 		Valid values are hardfloat (default), softfloat.
+// 	GOPPC64
+// 		For GOARCH=ppc64{,le}, the target ISA (Instruction Set Architecture).
+// 		Valid values are power8 (default), power9.
 // 	GOWASM
 // 		For GOARCH=wasm, comma-separated list of experimental WebAssembly features to use.
 // 		Valid values are satconv, signext.
@@ -1869,6 +2029,12 @@
 // 	GCCGOTOOLDIR
 // 		If set, where to find gccgo tools, such as cgo.
 // 		The default is based on how gccgo was configured.
+// 	GOEXPERIMENT
+// 		Comma-separated list of toolchain experiments to enable or disable.
+// 		The list of available experiments may change arbitrarily over time.
+// 		See src/internal/goexperiment/flags.go for currently valid values.
+// 		Warning: This variable is provided for the development and testing
+// 		of the Go toolchain itself. Use beyond that purpose is unsupported.
 // 	GOROOT_FINAL
 // 		The root of the installed Go tree, when it is
 // 		installed in a location other than where it is built.
@@ -1952,7 +2118,7 @@
 // The go.mod file format is described in detail at
 // https://golang.org/ref/mod#go-mod-file.
 //
-// To create a new go.mod file, use 'go help init'. For details see
+// To create a new go.mod file, use 'go mod init'. For details see
 // 'go help mod init' or https://golang.org/ref/mod#go-mod-init.
 //
 // To add missing module requirements or remove unneeded requirements,
@@ -2582,9 +2748,10 @@
 // 	    (for example, -benchtime 100x).
 //
 // 	-count n
-// 	    Run each test and benchmark n times (default 1).
+// 	    Run each test, benchmark, and fuzz seed n times (default 1).
 // 	    If -cpu is set, run n times for each GOMAXPROCS value.
-// 	    Examples are always run once.
+// 	    Examples are always run once. -count does not apply to
+// 	    fuzz targets matched by -fuzz.
 //
 // 	-cover
 // 	    Enable coverage analysis.
@@ -2611,32 +2778,59 @@
 // 	    Sets -cover.
 //
 // 	-cpu 1,2,4
-// 	    Specify a list of GOMAXPROCS values for which the tests or
-// 	    benchmarks should be executed. The default is the current value
-// 	    of GOMAXPROCS.
+// 	    Specify a list of GOMAXPROCS values for which the tests, benchmarks or
+// 	    fuzz targets should be executed. The default is the current value
+// 	    of GOMAXPROCS. -cpu does not apply to fuzz targets matched by -fuzz.
 //
 // 	-failfast
 // 	    Do not start new tests after the first test failure.
 //
+// 	-fuzz regexp
+// 	    Run the fuzz target matching the regular expression. When specified,
+// 	    the command line argument must match exactly one package, and regexp
+// 	    must match exactly one fuzz target within that package. After tests,
+// 	    benchmarks, seed corpora of other fuzz targets, and examples have
+// 	    completed, the matching target will be fuzzed. See the Fuzzing section
+// 	    of the testing package documentation for details.
+//
+// 	-fuzztime t
+// 	    Run enough iterations of the fuzz test to take t, specified as a
+// 	    time.Duration (for example, -fuzztime 1h30s). The default is to run
+// 	    forever.
+// 	    The special syntax Nx means to run the fuzz test N times
+// 	    (for example, -fuzztime 100x).
+//
+// 	-json
+// 	    Log verbose output and test results in JSON. This presents the
+// 	    same information as the -v flag in a machine-readable format.
+//
 // 	-list regexp
-// 	    List tests, benchmarks, or examples matching the regular expression.
-// 	    No tests, benchmarks or examples will be run. This will only
-// 	    list top-level tests. No subtest or subbenchmarks will be shown.
+// 	    List tests, benchmarks, fuzz targets, or examples matching the regular
+// 	    expression. No tests, benchmarks, fuzz targets, or examples will be run.
+// 	    This will only list top-level tests. No subtest or subbenchmarks will be
+// 	    shown.
 //
 // 	-parallel n
-// 	    Allow parallel execution of test functions that call t.Parallel.
+// 	    Allow parallel execution of test functions that call t.Parallel, and
+// 	    f.Fuzz functions that call t.Parallel when running the seed corpus.
 // 	    The value of this flag is the maximum number of tests to run
-// 	    simultaneously; by default, it is set to the value of GOMAXPROCS.
+// 	    simultaneously.
+// 	    While fuzzing, the value of this flag is the maximum number of
+// 	    subprocesses that may call the fuzz function simultaneously, regardless of
+// 	    whether T.Parallel is called.
+// 	    By default, -parallel is set to the value of GOMAXPROCS.
+// 	    Setting -parallel to values higher than GOMAXPROCS may cause degraded
+// 	    performance due to CPU contention, especially when fuzzing.
 // 	    Note that -parallel only applies within a single test binary.
 // 	    The 'go test' command may run tests for different packages
 // 	    in parallel as well, according to the setting of the -p flag
 // 	    (see 'go help build').
 //
 // 	-run regexp
-// 	    Run only those tests and examples matching the regular expression.
-// 	    For tests, the regular expression is split by unbracketed slash (/)
-// 	    characters into a sequence of regular expressions, and each part
-// 	    of a test's identifier must match the corresponding element in
+// 	    Run only those tests, examples, and fuzz targets matching the regular
+// 	    expression. For tests, the regular expression is split by unbracketed
+// 	    slash (/) characters into a sequence of regular expressions, and each
+// 	    part of a test's identifier must match the corresponding element in
 // 	    the sequence, if any. Note that possible parents of matches are
 // 	    run too, so that -run=X/Y matches and runs and reports the result
 // 	    of all tests matching X, even those without sub-tests matching Y,
@@ -2647,6 +2841,13 @@
 // 	    It is off by default but set during all.bash so that installing
 // 	    the Go tree can run a sanity check but not spend time running
 // 	    exhaustive tests.
+//
+// 	-shuffle off,on,N
+// 		Randomize the execution order of tests and benchmarks.
+// 		It is off by default. If -shuffle is set to on, then it will seed
+// 		the randomizer using the system clock. If -shuffle is set to an
+// 		integer N, then N will be used as the seed value. In both cases,
+// 		the seed will be reported for reproducibility.
 //
 // 	-timeout d
 // 	    If a test binary runs longer than duration d, panic.
@@ -2796,6 +2997,10 @@
 //
 // 	func BenchmarkXxx(b *testing.B) { ... }
 //
+// A fuzz target is one named FuzzXxx and should have the signature,
+//
+// 	func FuzzXxx(f *testing.F) { ... }
+//
 // An example function is similar to a test function but, instead of using
 // *testing.T to report success or failure, prints output to os.Stdout.
 // If the last comment in the function starts with "Output:" then the output
@@ -2835,7 +3040,7 @@
 //
 // The entire test file is presented as the example when it contains a single
 // example function, at least one other function, type, variable, or constant
-// declaration, and no test or benchmark functions.
+// declaration, and no fuzz targets or test or benchmark functions.
 //
 // See the documentation of the testing package for more information.
 //
